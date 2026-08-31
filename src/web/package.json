@@ -1,0 +1,52 @@
+{
+  "name": "@mail-suite/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.3",
+  "engines": {
+    "node": "24.15.0",
+    "pnpm": "10.33.3"
+  },
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "contract": "redocly lint --config redocly.yaml ../backend/contracts/openapi/health.yaml",
+    "dev": "vite --host 127.0.0.1",
+    "e2e": "playwright test",
+    "e2e:install": "playwright install --with-deps chromium",
+    "format": "prettier --write . ../../tests/e2e ../../eslint.config.js",
+    "format:check": "prettier --check . ../../tests/e2e ../../eslint.config.js",
+    "lint": "node scripts/lint.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.102.8",
+    "lucide-react": "1.35.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@hey-api/openapi-ts": "0.99.0",
+    "@playwright/test": "1.62.1",
+    "@redocly/cli": "2.49.0",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.1",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.5",
+    "globals": "17.11.0",
+    "jsdom": "30.0.1",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.68.0",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

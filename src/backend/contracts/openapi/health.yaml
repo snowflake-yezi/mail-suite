@@ -1,0 +1,62 @@
+openapi: 3.1.0
+info:
+  title: Mail Suite Internal Health API
+  version: 0.1.0
+  description: api 与 worker 进程共用的内部存活和就绪契约。
+servers:
+  - url: /
+    description: 由当前进程同源提供的内部端点
+security: []
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: 获取进程存活状态
+      responses:
+        "200":
+          description: 当前进程事件循环可服务。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Healthy"
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: 获取进程就绪状态
+      responses:
+        "200":
+          description: 当前进程的必需依赖可用。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Healthy"
+        "503":
+          description: 进程正在停止或至少一个必需依赖不可用。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Unavailable"
+components:
+  schemas:
+    Healthy:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ok
+    Unavailable:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - code
+      properties:
+        status:
+          type: string
+          const: unavailable
+        code:
+          type: string
+          const: DEPENDENCY_UNAVAILABLE

@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.cache
+.pnpm-store
+.tmp
+.env
+.env.*
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+docs
+tests
+assets
+logo.jpg

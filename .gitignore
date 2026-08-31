@@ -1,0 +1,26 @@
+# 编辑器与本机配置
+/.idea/
+/.vscode/
+/.env
+/.env.*
+!/.env.example
+
+# 项目级缓存与临时输出
+/.cache/
+/.pnpm-store/
+/.tmp/
+
+# Go 构建输出
+/bin/
+*.exe
+*.test
+*.out
+
+# Web 依赖、构建与测试输出
+**/node_modules/
+/src/web/dist/
+/src/web/coverage/
+*.tsbuildinfo
+
+# 来源尚未确认的根目录品牌文件
+/logo.jpg

@@ -1,0 +1,23 @@
+name: mail-suite-dev
+
+services:
+  postgres:
+    image: postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: mail_suite
+      POSTGRES_USER: mail_suite
+      POSTGRES_PASSWORD: ${MAIL_SUITE_DEV_POSTGRES_PASSWORD:?请设置一次性本地数据库密码}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
