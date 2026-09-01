@@ -43,6 +43,10 @@ jobs:
       - name: Check formatting
         shell: bash
         run: test -z "$(gofmt -l ./src/backend ./tests)"
+      - name: Check generated PostgreSQL queries
+        run: |
+          go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate
+          test -z "$(git status --porcelain --untracked-files=all -- src/backend/internal/data/postgres/generated)"
       - name: Vet
         run: go vet ./...
       - name: Lint

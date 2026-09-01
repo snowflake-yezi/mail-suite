@@ -1,0 +1,478 @@
+openapi: 3.1.0
+info:
+  title: Mail Suite Authentication API
+  version: 0.1.0
+  description: 浏览器 OIDC 登录、服务端会话、退出和 OIDC backchannel logout 契约。
+servers:
+  - url: /
+    description: 由 Mail Suite 主站同源提供
+security: []
+tags:
+  - name: Session
+    description: 浏览器当前会话
+  - name: Authentication
+    description: OIDC 登录与撤销
+paths:
+  /api/v1/session:
+    get:
+      operationId: getSession
+      tags:
+        - Session
+      summary: 获取当前浏览器会话
+      description: >-
+        通过 __Host-mail_suite_session 不透明 Cookie 查询服务端会话。匿名请求也返回 200，
+        响应不包含任何 OIDC token、原始 claim 或凭据。
+      responses:
+        "200":
+          description: 匿名或已认证会话摘要。
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/auth/login:
+    get:
+      operationId: startOidcLogin
+      tags:
+        - Authentication
+      summary: 发起 OIDC Authorization Code + PKCE 登录
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          description: >-
+            经过规范化的站内绝对路径。callback 会按服务端账号类型再次校验，不匹配时使用固定落点。
+          schema:
+            type: string
+            maxLength: 2048
+            example: /mail/inbox
+      responses:
+        "302":
+          description: 创建一次性登录流程并跳转到外部 OIDC Provider。
+          headers:
+            Location:
+              description: OIDC Provider authorization endpoint，包含 state、nonce 和 S256 challenge。
+              required: true
+              schema:
+                type: string
+                format: uri
+            Set-Cookie:
+              description: >-
+                设置最长 600 秒的 __Host-mail_suite_auth_flow 关联 Cookie；固定 Secure、HttpOnly、
+                SameSite=Lax、Path=/，不设置 Domain。Cookie 值不承载 state、nonce 或 verifier 明文。
+              required: true
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/auth/callback:
+    get:
+      operationId: completeOidcLogin
+      tags:
+        - Authentication
+      summary: 完成 OIDC callback 并建立本地会话
+      description: >-
+        state 必填；code 与 error 必须且只能出现一个。任何失败均不得创建部分会话或恢复已消费流程。
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 2048
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 4096
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+        - name: error_description
+          in: query
+          required: false
+          description: 只用于服务端脱敏诊断，不得直接回显或持久化。
+          schema:
+            type: string
+            maxLength: 1024
+      responses:
+        "302":
+          description: 建立本地会话后跳转到账号类型允许的固定落点或同端 return_to。
+          headers:
+            Location:
+              description: "/mail/ 或 /admin/ 下经过账号类型校验的站内路径。"
+              required: true
+              schema:
+                type: string
+                format: uri-reference
+            Set-Cookie:
+              description: >-
+                设置 __Host-mail_suite_session 并清理 __Host-mail_suite_auth_flow。会话 Cookie 固定
+                Secure、HttpOnly、SameSite=Lax、Path=/，不设置 Domain；值至少包含 256 bit 随机熵。
+              required: true
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/AuthFlowInvalid"
+        "403":
+          $ref: "#/components/responses/AccessDenied"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags:
+        - Authentication
+      summary: 撤销当前本地会话
+      description: 重复退出保持幂等；本地撤销必须先于任何可选 IdP end-session 跳转。
+      parameters:
+        - $ref: "#/components/parameters/CsrfToken"
+      responses:
+        "204":
+          description: 当前本地会话已撤销或本来就不存在。
+          headers:
+            Set-Cookie:
+              description: >-
+                使用 Max-Age=0 清理 __Host-mail_suite_session；属性保持 Secure、HttpOnly、
+                SameSite=Lax、Path=/，不设置 Domain。
+              required: true
+              schema:
+                type: string
+        "403":
+          $ref: "#/components/responses/CsrfRejected"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /api/v1/auth/backchannel-logout:
+    post:
+      operationId: oidcBackchannelLogout
+      tags:
+        - Authentication
+      summary: 处理 OIDC backchannel logout
+      description: >-
+        校验 logout token 的签名、issuer、audience、events、时间与 sid/sub 后执行幂等撤销。
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - logout_token
+              properties:
+                logout_token:
+                  type: string
+                  minLength: 1
+                  maxLength: 16384
+                  description: 仅在请求内验证，不写入日志、审计或普通数据库列。
+      responses:
+        "204":
+          description: 匹配会话已幂等撤销。
+        "400":
+          $ref: "#/components/responses/BackchannelInvalid"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+components:
+  parameters:
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: 与当前会话绑定的双提交 CSRF nonce，必须同时通过可信 Origin/Referer 校验。
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 256
+  headers:
+    NoStore:
+      description: 会话响应不得被浏览器或共享缓存持久化。
+      required: true
+      schema:
+        type: string
+        const: no-store
+    RetryAfter:
+      description: 调用方重试前至少等待的秒数。
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    InvalidRequest:
+      description: 请求参数不满足公开契约。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalidReturnTo:
+              value:
+                error:
+                  code: INVALID_RETURN_TO
+                  message: 登录返回地址无效
+                  request_id: "00000000000000000000000000000000"
+    AuthFlowInvalid:
+      description: 登录流程无效、过期、已消费或 OIDC callback 校验失败。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalidFlow:
+              value:
+                error:
+                  code: AUTH_FLOW_INVALID
+                  message: 登录请求已失效，请重新登录
+                  request_id: "00000000000000000000000000000000"
+    AccessDenied:
+      description: 外部身份没有可用的本地产品账号映射。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            forbidden:
+              value:
+                error:
+                  code: AUTH_FORBIDDEN
+                  message: 当前账号无法访问 Mail Suite
+                  request_id: "00000000000000000000000000000000"
+    CsrfRejected:
+      description: CSRF nonce 或请求来源校验失败。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            csrfInvalid:
+              value:
+                error:
+                  code: CSRF_INVALID
+                  message: 请求验证失败
+                  request_id: "00000000000000000000000000000000"
+    BackchannelInvalid:
+      description: logout token 缺失或未通过协议校验。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalidLogoutToken:
+              value:
+                error:
+                  code: BACKCHANNEL_LOGOUT_INVALID
+                  message: 退出请求无效
+                  request_id: "00000000000000000000000000000000"
+    RateLimited:
+      description: 端点独立速率限制已触发。
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            limited:
+              value:
+                error:
+                  code: RATE_LIMITED
+                  message: 请求过于频繁，请稍后重试
+                  request_id: "00000000000000000000000000000000"
+    ServiceUnavailable:
+      description: 认证依赖暂时不可用，不创建或恢复会话。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            unavailable:
+              value:
+                error:
+                  code: AUTH_SERVICE_UNAVAILABLE
+                  message: 登录服务暂时不可用
+                  request_id: "00000000000000000000000000000000"
+  schemas:
+    Session:
+      oneOf:
+        - $ref: "#/components/schemas/AnonymousSession"
+        - $ref: "#/components/schemas/MailboxSession"
+        - $ref: "#/components/schemas/AdministratorSession"
+    AnonymousSession:
+      type: object
+      additionalProperties: false
+      required:
+        - authenticated
+      properties:
+        authenticated:
+          type: boolean
+          const: false
+    MailboxSession:
+      type: object
+      additionalProperties: false
+      required:
+        - authenticated
+        - principal
+        - account_type
+        - tenant_id
+        - mailbox
+        - permissions
+        - expires_at
+        - csrf_token
+      properties:
+        authenticated:
+          type: boolean
+          const: true
+        principal:
+          $ref: "#/components/schemas/PrincipalSummary"
+        account_type:
+          type: string
+          const: mailbox
+        tenant_id:
+          type: string
+          format: uuid
+        mailbox:
+          $ref: "#/components/schemas/MailboxSummary"
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PermissionName"
+        expires_at:
+          type: string
+          format: date-time
+          description: 当前空闲与绝对过期时间中的较早值。
+        csrf_token:
+          type: string
+          minLength: 32
+          maxLength: 256
+          description: 当前会话的 CSRF nonce，不是 bearer token。
+    AdministratorSession:
+      type: object
+      additionalProperties: false
+      required:
+        - authenticated
+        - principal
+        - account_type
+        - tenant_id
+        - permissions
+        - expires_at
+        - csrf_token
+      properties:
+        authenticated:
+          type: boolean
+          const: true
+        principal:
+          $ref: "#/components/schemas/PrincipalSummary"
+        account_type:
+          type: string
+          const: administrator
+        tenant_id:
+          type: string
+          format: uuid
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PermissionName"
+        expires_at:
+          type: string
+          format: date-time
+          description: 当前空闲与绝对过期时间中的较早值。
+        csrf_token:
+          type: string
+          minLength: 32
+          maxLength: 256
+          description: 当前会话的 CSRF nonce，不是 bearer token。
+    PrincipalSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - display_name
+      properties:
+        id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+    MailboxSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - address
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          type: string
+          format: email
+          maxLength: 320
+    PermissionName:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*)+$"
+      example: portal.admin.access
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+        - message
+        - request_id
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 256
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._-]+$"
+    ErrorCode:
+      type: string
+      enum:
+        - INVALID_REQUEST
+        - INVALID_RETURN_TO
+        - AUTH_REQUIRED
+        - AUTH_FORBIDDEN
+        - AUTH_FLOW_INVALID
+        - CSRF_INVALID
+        - BACKCHANNEL_LOGOUT_INVALID
+        - RATE_LIMITED
+        - AUTH_SERVICE_UNAVAILABLE
