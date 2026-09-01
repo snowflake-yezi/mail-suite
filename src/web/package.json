@@ -10,9 +10,9 @@
   },
   "scripts": {
     "build": "tsc -b && vite build",
-    "contract": "redocly lint --config redocly.yaml ../backend/contracts/openapi/health.yaml",
+    "contract": "redocly lint --config redocly.yaml ../backend/contracts/openapi/health.yaml ../backend/contracts/openapi/auth.yaml",
     "dev": "vite --host 127.0.0.1",
-    "e2e": "playwright test",
+    "e2e": "node scripts/run-e2e.mjs",
     "e2e:install": "playwright install --with-deps chromium",
     "format": "prettier --write . ../../tests/e2e ../../eslint.config.js",
     "format:check": "prettier --check . ../../tests/e2e ../../eslint.config.js",

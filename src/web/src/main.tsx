@@ -5,6 +5,7 @@ import { BrowserRouter } from 'react-router-dom'
 
 import { App } from './app/App'
 import { ErrorBoundary } from './app/ErrorBoundary'
+import { ThemeProvider } from './app/theme/ThemeProvider'
 import './styles.css'
 
 // queryClient 只管理可丢弃的服务端状态缓存，不持久化敏感响应。
@@ -25,11 +26,13 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     <ErrorBoundary>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
-      </QueryClientProvider>
+      <ThemeProvider>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
+        </QueryClientProvider>
+      </ThemeProvider>
     </ErrorBoundary>
   </StrictMode>,
 )
