@@ -1,0 +1,171 @@
+name: mail-suite-test
+
+x-service-defaults: &service-defaults
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: local
+    options:
+      max-file: "3"
+      max-size: 10m
+
+x-database-environment: &database-environment
+  MAIL_SUITE_DATABASE_URL: postgres://mail_suite:${MAIL_SUITE_POSTGRES_PASSWORD:?请设置远端数据库密码}@postgres:5432/mail_suite?sslmode=disable
+
+services:
+  postgres:
+    image: mail-suite-postgres:17.11-alpine-18cfe3ef
+    pull_policy: never
+    environment:
+      POSTGRES_DB: mail_suite
+      POSTGRES_USER: mail_suite
+      POSTGRES_PASSWORD: ${MAIL_SUITE_POSTGRES_PASSWORD:?请设置远端数据库密码}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-file: "3"
+        max-size: 10m
+    cpus: 0.75
+    mem_limit: 512m
+    mem_reservation: 256m
+    pids_limit: 128
+    shm_size: 64m
+
+  migrator:
+    image: mail-suite-migrator:${MAIL_SUITE_IMAGE_TAG:-test}
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: migrator
+        VERSION: ${MAIL_SUITE_VERSION:-test}
+        REVISION: ${MAIL_SUITE_REVISION:-working-tree}
+    environment: *database-environment
+    command: ["--status"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-file: "3"
+        max-size: 10m
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
+  api:
+    <<: *service-defaults
+    image: mail-suite-api:${MAIL_SUITE_IMAGE_TAG:-test}
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: api
+        VERSION: ${MAIL_SUITE_VERSION:-test}
+        REVISION: ${MAIL_SUITE_REVISION:-working-tree}
+    environment:
+      <<: *database-environment
+      MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8080"
+    networks:
+      - backend
+      - edge
+    read_only: true
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
+  worker:
+    <<: *service-defaults
+    image: mail-suite-worker:${MAIL_SUITE_IMAGE_TAG:-test}
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: worker
+        VERSION: ${MAIL_SUITE_VERSION:-test}
+        REVISION: ${MAIL_SUITE_REVISION:-working-tree}
+    environment:
+      <<: *database-environment
+      MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8081
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8081"
+    networks:
+      - backend
+    read_only: true
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
+  web:
+    <<: *service-defaults
+    image: mail-suite-web:${MAIL_SUITE_IMAGE_TAG:-test}
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: src/web/Dockerfile
+      args:
+        VERSION: ${MAIL_SUITE_VERSION:-test}
+        REVISION: ${MAIL_SUITE_REVISION:-working-tree}
+    environment:
+      MAIL_SUITE_API_UPSTREAM: http://api:8080
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - 127.0.0.1:${MAIL_SUITE_PREVIEW_PORT:-18080}:8080
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    tmpfs:
+      - /run:uid=101,gid=101,mode=0755
+    cpus: 0.25
+    mem_limit: 96m
+    pids_limit: 64
+
+networks:
+  backend:
+    internal: true
+  edge:
+
+volumes:
+  postgres-data:

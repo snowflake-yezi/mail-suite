@@ -9,6 +9,7 @@
 /.cache/
 /.pnpm-store/
 /.tmp/
+/key/
 
 # Go 构建输出
 /bin/
@@ -21,6 +22,3 @@
 /src/web/dist/
 /src/web/coverage/
 *.tsbuildinfo
-
-# 来源尚未确认的根目录品牌文件
-/logo.jpg

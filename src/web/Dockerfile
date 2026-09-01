@@ -4,6 +4,7 @@ WORKDIR /workspace/src/web
 COPY src/web/package.json src/web/pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY src/web/index.html src/web/tsconfig.json src/web/tsconfig.app.json src/web/tsconfig.node.json src/web/vite.config.ts src/web/playwright.config.ts ./
+COPY logo.jpg /workspace/logo.jpg
 COPY src/web/src ./src
 RUN pnpm run build
 
@@ -19,5 +20,7 @@ LABEL org.opencontainers.image.title="mail-suite web" \
 ENV MAIL_SUITE_API_UPSTREAM=http://api:8080
 COPY src/web/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /workspace/src/web/dist /usr/share/nginx/html
+RUN chown -R nginx:nginx /etc/nginx/conf.d /run /var/cache/nginx /usr/share/nginx/html
 
+USER nginx
 EXPOSE 8080

@@ -4,6 +4,7 @@
 .cache
 .pnpm-store
 .tmp
+key
 .env
 .env.*
 **/node_modules
@@ -13,4 +14,3 @@
 docs
 tests
 assets
-logo.jpg
