@@ -101,6 +101,8 @@ func TestNormalizeReturnPathRejectsCrossOriginEncodingAndControlAmbiguity(t *tes
 	for _, candidate := range invalid {
 		if normalized, err := NormalizeReturnPath(candidate); err == nil {
 			t.Fatalf("危险返回路径被接受：candidate=%q normalized=%q", candidate, normalized)
+		} else if !HasErrorCode(err, ErrorCodeInvalidReturnTo) {
+			t.Fatalf("危险返回路径应使用稳定错误码：candidate=%q err=%v", candidate, err)
 		}
 	}
 }

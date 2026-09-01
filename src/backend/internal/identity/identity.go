@@ -47,12 +47,16 @@ type ErrorCode string
 const (
 	// ErrorCodeInvalidRequest 表示调用参数不满足认证领域约束。
 	ErrorCodeInvalidRequest ErrorCode = "INVALID_REQUEST"
+	// ErrorCodeInvalidReturnTo 表示登录返回地址不属于规范站内受保护路径。
+	ErrorCodeInvalidReturnTo ErrorCode = "INVALID_RETURN_TO"
 	// ErrorCodeAuthRequired 表示当前请求没有可用的本地会话。
 	ErrorCodeAuthRequired ErrorCode = "AUTH_REQUIRED"
 	// ErrorCodeAuthForbidden 隐藏主体不存在、停用和缺少产品权限等内部差异。
 	ErrorCodeAuthForbidden ErrorCode = "AUTH_FORBIDDEN"
 	// ErrorCodeAuthFlowInvalid 表示一次性登录流程不存在、过期、已消费或不匹配。
 	ErrorCodeAuthFlowInvalid ErrorCode = "AUTH_FLOW_INVALID"
+	// ErrorCodeCSRFInvalid 表示状态改变请求的来源或会话绑定 nonce 校验失败。
+	ErrorCodeCSRFInvalid ErrorCode = "CSRF_INVALID"
 	// ErrorCodePersistenceUnavailable 表示数据库无法完成或确认认证操作。
 	ErrorCodePersistenceUnavailable ErrorCode = "AUTH_SERVICE_UNAVAILABLE"
 )
@@ -74,9 +78,11 @@ func (identityError *Error) Error() string {
 func NewError(code ErrorCode) *Error {
 	messages := map[ErrorCode]string{
 		ErrorCodeInvalidRequest:         "认证请求无效",
+		ErrorCodeInvalidReturnTo:        "登录返回地址无效",
 		ErrorCodeAuthRequired:           "需要登录",
 		ErrorCodeAuthForbidden:          "当前账号无法访问 Mail Suite",
 		ErrorCodeAuthFlowInvalid:        "登录请求已失效，请重新登录",
+		ErrorCodeCSRFInvalid:            "请求验证失败",
 		ErrorCodePersistenceUnavailable: "登录服务暂时不可用",
 	}
 	message, found := messages[code]
@@ -284,10 +290,14 @@ type Repository interface {
 	ResolvePrincipal(context.Context, string, string) (Principal, error)
 	// CreateSession 创建已完成 OIDC 和本地授权校验的服务端会话。
 	CreateSession(context.Context, SessionToCreate) (CreatedSession, error)
+	// CreateSessionWithAudit 在同一事务中创建会话和登录成功审计。
+	CreateSessionWithAudit(context.Context, SessionToCreate, AuditEvent) (CreatedSession, error)
 	// ResolveSession 按 Cookie 摘要读取并刷新当前有效会话。
 	ResolveSession(context.Context, [32]byte, time.Time) (Session, error)
 	// RevokeSession 按 Cookie 摘要幂等撤销当前会话。
 	RevokeSession(context.Context, [32]byte, time.Time, RevocationReason) error
+	// RevokeSessionWithAudit 在同一事务中幂等撤销会话并记录退出成功审计。
+	RevokeSessionWithAudit(context.Context, [32]byte, time.Time, RevocationReason, AuditEvent) error
 	// RevokeByOIDCSessionID 按 issuer 与 sid 幂等撤销匹配设备会话。
 	RevokeByOIDCSessionID(context.Context, string, string, time.Time) (int64, error)
 	// RevokeByOIDCSubject 按 issuer 与 subject 幂等撤销全部设备会话。

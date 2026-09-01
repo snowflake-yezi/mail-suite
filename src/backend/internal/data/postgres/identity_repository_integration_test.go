@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,7 +110,38 @@ func TestIdentityRepositoryEnforcesOneTimeFlowAndCurrentSessionAuthorization(t *
 	createdAt := now.Add(-6 * time.Minute)
 	mailboxSessionDigest := testDigest("mailbox-session-" + fixtures.suffix)
 	csrfDigest := testDigest("csrf-" + fixtures.suffix)
-	_, err = repository.CreateSession(ctx, identity.SessionToCreate{
+	rolledBackSessionDigest := testDigest("rolled-back-session-" + fixtures.suffix)
+	_, err = repository.CreateSessionWithAudit(ctx, identity.SessionToCreate{
+		ID:                uuid.New(),
+		SessionDigest:     rolledBackSessionDigest,
+		PrincipalID:       fixtures.mailboxPrincipalID,
+		OIDCIssuer:        fixtures.issuer,
+		OIDCSubject:       fixtures.mailboxSubject,
+		CSRFDigest:        testDigest("rolled-back-csrf-" + fixtures.suffix),
+		CreatedAt:         now,
+		IdleExpiresAt:     now.Add(identity.DefaultSessionIdleTimeout),
+		AbsoluteExpiresAt: now.Add(identity.DefaultSessionAbsoluteTimeout),
+	}, identity.AuditEvent{
+		ID:           uuid.New(),
+		PrincipalID:  &fixtures.mailboxPrincipalID,
+		Action:       "login",
+		Result:       "succeeded",
+		SourceDigest: testDigest("rolled-back-source-" + fixtures.suffix),
+		RequestID:    strings.Repeat("x", 65),
+		OccurredAt:   now,
+	})
+	if !identity.HasErrorCode(err, identity.ErrorCodePersistenceUnavailable) {
+		t.Fatalf("审计写入失败必须回滚会话创建，实际为 %v", err)
+	}
+	var rolledBackSessionCount int
+	if err = pool.QueryRow(
+		ctx,
+		"SELECT count(*) FROM user_sessions WHERE session_digest = $1",
+		rolledBackSessionDigest[:],
+	).Scan(&rolledBackSessionCount); err != nil || rolledBackSessionCount != 0 {
+		t.Fatalf("审计失败后不得残留会话：count=%d err=%v", rolledBackSessionCount, err)
+	}
+	_, err = repository.CreateSessionWithAudit(ctx, identity.SessionToCreate{
 		ID:                uuid.New(),
 		SessionDigest:     mailboxSessionDigest,
 		PrincipalID:       fixtures.mailboxPrincipalID,
@@ -120,6 +152,14 @@ func TestIdentityRepositoryEnforcesOneTimeFlowAndCurrentSessionAuthorization(t *
 		CreatedAt:         createdAt,
 		IdleExpiresAt:     createdAt.Add(identity.DefaultSessionIdleTimeout),
 		AbsoluteExpiresAt: createdAt.Add(identity.DefaultSessionAbsoluteTimeout),
+	}, identity.AuditEvent{
+		ID:           uuid.New(),
+		PrincipalID:  &fixtures.mailboxPrincipalID,
+		Action:       "login",
+		Result:       "succeeded",
+		SourceDigest: testDigest("login-source-" + fixtures.suffix),
+		RequestID:    "identity-test-" + fixtures.suffix,
+		OccurredAt:   createdAt,
 	})
 	if err != nil {
 		t.Fatalf("创建邮箱会话失败：%v", err)
@@ -156,11 +196,41 @@ func TestIdentityRepositoryEnforcesOneTimeFlowAndCurrentSessionAuthorization(t *
 	); err != nil {
 		t.Fatalf("恢复邮箱主体测试状态失败：%v", err)
 	}
-	if err = repository.RevokeSession(
+	err = repository.RevokeSessionWithAudit(
+		ctx,
+		mailboxSessionDigest,
+		now.Add(2500*time.Millisecond),
+		identity.RevocationReasonLogout,
+		identity.AuditEvent{
+			ID:           uuid.New(),
+			PrincipalID:  &fixtures.mailboxPrincipalID,
+			Action:       "logout",
+			Result:       "succeeded",
+			SourceDigest: testDigest("rolled-back-logout-source-" + fixtures.suffix),
+			RequestID:    strings.Repeat("y", 65),
+			OccurredAt:   now.Add(2500 * time.Millisecond),
+		},
+	)
+	if !identity.HasErrorCode(err, identity.ErrorCodePersistenceUnavailable) {
+		t.Fatalf("退出审计失败必须回滚会话撤销，实际为 %v", err)
+	}
+	if _, err = repository.ResolveSession(ctx, mailboxSessionDigest, now.Add(2750*time.Millisecond)); err != nil {
+		t.Fatalf("退出审计失败后原会话必须仍有效：%v", err)
+	}
+	if err = repository.RevokeSessionWithAudit(
 		ctx,
 		mailboxSessionDigest,
 		now.Add(3*time.Second),
 		identity.RevocationReasonLogout,
+		identity.AuditEvent{
+			ID:           uuid.New(),
+			PrincipalID:  &fixtures.mailboxPrincipalID,
+			Action:       "logout",
+			Result:       "succeeded",
+			SourceDigest: testDigest("logout-source-" + fixtures.suffix),
+			RequestID:    "identity-test-" + fixtures.suffix,
+			OccurredAt:   now.Add(3 * time.Second),
+		},
 	); err != nil {
 		t.Fatalf("撤销邮箱会话失败：%v", err)
 	}
@@ -263,7 +333,7 @@ func TestIdentityRepositoryEnforcesOneTimeFlowAndCurrentSessionAuthorization(t *
 		ctx,
 		"SELECT count(*) FROM authentication_audit_events WHERE request_id = $1",
 		"identity-test-"+fixtures.suffix,
-	).Scan(&auditCount); err != nil || auditCount != 1 {
+	).Scan(&auditCount); err != nil || auditCount != 3 {
 		t.Fatalf("认证审计行数错误：count=%d err=%v", auditCount, err)
 	}
 }

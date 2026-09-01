@@ -152,6 +152,43 @@ func (repository *IdentityRepository) CreateSession(
 	ctx context.Context,
 	session identity.SessionToCreate,
 ) (identity.CreatedSession, error) {
+	return createSession(ctx, generated.New(repository.pool), session)
+}
+
+// CreateSessionWithAudit 在一个 PostgreSQL 事务中创建会话与登录成功审计。
+func (repository *IdentityRepository) CreateSessionWithAudit(
+	ctx context.Context,
+	session identity.SessionToCreate,
+	event identity.AuditEvent,
+) (identity.CreatedSession, error) {
+	if event.Action != "login" || event.Result != "succeeded" || event.PrincipalID == nil || *event.PrincipalID != session.PrincipalID {
+		return identity.CreatedSession{}, identity.NewError(identity.ErrorCodeInvalidRequest)
+	}
+	tx, err := repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return identity.CreatedSession{}, identityPersistenceError(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := generated.New(tx)
+	created, err := createSession(ctx, queries, session)
+	if err != nil {
+		return identity.CreatedSession{}, err
+	}
+	if err = createAudit(ctx, queries, event); err != nil {
+		return identity.CreatedSession{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return identity.CreatedSession{}, identityPersistenceError(err)
+	}
+	return created, nil
+}
+
+// createSession 校验会话生命周期并使用指定 sqlc 查询器持久化。
+func createSession(
+	ctx context.Context,
+	queries *generated.Queries,
+	session identity.SessionToCreate,
+) (identity.CreatedSession, error) {
 	if session.ID == uuid.Nil ||
 		session.PrincipalID == uuid.Nil ||
 		session.OIDCIssuer == "" ||
@@ -164,7 +201,7 @@ func (repository *IdentityRepository) CreateSession(
 		session.AbsoluteExpiresAt.After(session.CreatedAt.Add(identity.DefaultSessionAbsoluteTimeout)) {
 		return identity.CreatedSession{}, identity.NewError(identity.ErrorCodeInvalidRequest)
 	}
-	row, err := generated.New(repository.pool).CreateUserSession(ctx, generated.CreateUserSessionParams{
+	row, err := queries.CreateUserSession(ctx, generated.CreateUserSessionParams{
 		ID:                session.ID,
 		SessionDigest:     session.SessionDigest[:],
 		PrincipalID:       session.PrincipalID,
@@ -267,10 +304,50 @@ func (repository *IdentityRepository) RevokeSession(
 	revokedAt time.Time,
 	reason identity.RevocationReason,
 ) error {
+	return revokeSession(ctx, generated.New(repository.pool), sessionDigest, revokedAt, reason)
+}
+
+// RevokeSessionWithAudit 在一个 PostgreSQL 事务中撤销会话与记录退出成功审计。
+func (repository *IdentityRepository) RevokeSessionWithAudit(
+	ctx context.Context,
+	sessionDigest [32]byte,
+	revokedAt time.Time,
+	reason identity.RevocationReason,
+	event identity.AuditEvent,
+) error {
+	if event.Action != "logout" || event.Result != "succeeded" || event.PrincipalID == nil {
+		return identity.NewError(identity.ErrorCodeInvalidRequest)
+	}
+	tx, err := repository.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return identityPersistenceError(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	queries := generated.New(tx)
+	if err = revokeSession(ctx, queries, sessionDigest, revokedAt, reason); err != nil {
+		return err
+	}
+	if err = createAudit(ctx, queries, event); err != nil {
+		return err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return identityPersistenceError(err)
+	}
+	return nil
+}
+
+// revokeSession 使用指定 sqlc 查询器幂等撤销会话。
+func revokeSession(
+	ctx context.Context,
+	queries *generated.Queries,
+	sessionDigest [32]byte,
+	revokedAt time.Time,
+	reason identity.RevocationReason,
+) error {
 	if revokedAt.IsZero() || !reason.Valid() {
 		return identity.NewError(identity.ErrorCodeInvalidRequest)
 	}
-	_, err := generated.New(repository.pool).RevokeSessionByDigest(ctx, generated.RevokeSessionByDigestParams{
+	_, err := queries.RevokeSessionByDigest(ctx, generated.RevokeSessionByDigestParams{
 		SessionDigest:    sessionDigest[:],
 		RevokedAt:        timestamptz(revokedAt),
 		RevocationReason: nullableText(string(reason)),
@@ -333,6 +410,11 @@ func (repository *IdentityRepository) RevokeByOIDCSubject(
 
 // RecordAudit 保存经过调用方脱敏的认证安全审计事件。
 func (repository *IdentityRepository) RecordAudit(ctx context.Context, event identity.AuditEvent) error {
+	return createAudit(ctx, generated.New(repository.pool), event)
+}
+
+// createAudit 校验并使用指定 sqlc 查询器写入脱敏认证审计。
+func createAudit(ctx context.Context, queries *generated.Queries, event identity.AuditEvent) error {
 	if event.ID == uuid.Nil ||
 		event.Action == "" ||
 		(event.Result != "succeeded" && event.Result != "failed") ||
@@ -342,7 +424,7 @@ func (repository *IdentityRepository) RecordAudit(ctx context.Context, event ide
 		event.OccurredAt.IsZero() {
 		return identity.NewError(identity.ErrorCodeInvalidRequest)
 	}
-	err := generated.New(repository.pool).CreateAuthenticationAuditEvent(
+	err := queries.CreateAuthenticationAuditEvent(
 		ctx,
 		generated.CreateAuthenticationAuditEventParams{
 			ID:              event.ID,

@@ -102,6 +102,7 @@ func startAPI(t *testing.T, binaryPath, httpAddress, databaseURL string) *apiPro
 		"MAIL_SUITE_HTTP_ADDRESS="+httpAddress,
 		"MAIL_SUITE_PROBE_TIMEOUT=250ms",
 		"MAIL_SUITE_SHUTDOWN_TIMEOUT=2s",
+		"MAIL_SUITE_AUTH_MODE=disabled",
 	)
 	command.Stdout = output
 	command.Stderr = output

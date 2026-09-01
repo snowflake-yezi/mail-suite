@@ -1,7 +1,8 @@
 # 单节点测试服务器部署
 
-该目录只部署当前已实现的 PostgreSQL、API/worker 健康基础和 Web 未连接预览。它不包含 mail-core，
-因此不能作为 SMTP 收件、OIDC 登录、邮件查看或导出的验收证据。
+该目录只部署当前已实现的 PostgreSQL、API/worker 健康基础和 Web 未连接预览。API 在此编排中
+显式使用 `MAIL_SUITE_AUTH_MODE=disabled`，不注册认证路由；部署不包含 IdP、TLS 或 mail-core，
+因此不能作为 SMTP 收件、OIDC 端到端登录、邮件查看或导出的验收证据。
 
 ## 固定环境
 

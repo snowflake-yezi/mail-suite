@@ -39,13 +39,24 @@ func (state *State) BeginShutdown() {
 	state.stopping.Store(true)
 }
 
-// NewHandler 创建仅包含内部健康端点的 Gin handler。
-func NewHandler(state *State, logger *slog.Logger) http.Handler {
+// RouteRegistrar 在共享 Gin engine 上注册一个受控业务路由集合。
+type RouteRegistrar interface {
+	// RegisterRoutes 注册当前模块拥有的路由和局部中间件。
+	RegisterRoutes(*gin.Engine)
+}
+
+// NewHandler 创建包含内部健康端点和可选业务模块的 Gin handler。
+func NewHandler(state *State, logger *slog.Logger, registrars ...RouteRegistrar) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(requestLogger(logger), recovery(logger))
 	router.GET("/health/live", state.live)
 	router.GET("/health/ready", state.ready)
+	for _, registrar := range registrars {
+		if registrar != nil {
+			registrar.RegisterRoutes(router)
+		}
+	}
 	return router
 }
 

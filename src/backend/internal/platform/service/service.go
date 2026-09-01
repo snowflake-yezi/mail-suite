@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/buildinfo"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/config"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/database"
@@ -19,8 +20,11 @@ import (
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/telemetry"
 )
 
-// Run 启动指定服务的健康端点和 PostgreSQL 就绪检查，直到上下文取消。
-func Run(ctx context.Context, serviceName, defaultHTTPAddress string) error {
+// RouteBuilder 在数据库连接建立后构造当前进程选择启用的业务路由。
+type RouteBuilder func(context.Context, *pgxpool.Pool, *slog.Logger) (probe.RouteRegistrar, error)
+
+// Run 启动指定服务的健康端点、可选业务路由和 PostgreSQL 就绪检查，直到上下文取消。
+func Run(ctx context.Context, serviceName, defaultHTTPAddress string, builders ...RouteBuilder) error {
 	serviceConfig, err := config.Load(serviceName, defaultHTTPAddress)
 	if err != nil {
 		return err
@@ -43,11 +47,21 @@ func Run(ctx context.Context, serviceName, defaultHTTPAddress string) error {
 		return err
 	}
 	defer pool.Close()
+	registrars := make([]probe.RouteRegistrar, 0, len(builders))
+	for _, builder := range builders {
+		registrar, buildErr := builder(ctx, pool, logger)
+		if buildErr != nil {
+			return buildErr
+		}
+		if registrar != nil {
+			registrars = append(registrars, registrar)
+		}
+	}
 
 	probeState := probe.NewState(database.NewChecker(pool), serviceConfig.ProbeTimeout)
 	server := &http.Server{
 		Addr:              serviceConfig.HTTPAddress,
-		Handler:           probe.NewHandler(probeState, logger),
+		Handler:           probe.NewHandler(probeState, logger, registrars...),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),

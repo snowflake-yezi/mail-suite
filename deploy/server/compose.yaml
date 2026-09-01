@@ -92,6 +92,7 @@ services:
     environment:
       <<: *database-environment
       MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8080
+      MAIL_SUITE_AUTH_MODE: disabled
     depends_on:
       postgres:
         condition: service_healthy

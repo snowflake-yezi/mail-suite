@@ -1,8 +1,8 @@
 # mail-suite
 
 `mail-suite` 当前已在工程脚手架上开始实现控制面业务。本仓库提供 Go 控制面进程、React 管理
-工作区、PostgreSQL 开发依赖，以及邮箱开通意图、operation 和 outbox 的原子持久化闭环；尚未
-开放业务 HTTP 路由、执行真实 mail-core 副作用或完成邮箱投递、邮件读取和高可用能力。
+工作区、PostgreSQL 开发依赖、邮箱开通意图持久化闭环，以及可显式启用的服务端 OIDC 登录、会话
+查询和本地退出 API；尚未接入前端路由守卫、真实 mail-core 副作用、邮箱投递、邮件读取或高可用能力。
 
 当前业务契约见
 [邮箱开通意图与 Operation Ledger 需求](docs/requirements/2026-08-31-mailbox-provisioning-intent.md)，
@@ -56,12 +56,13 @@ docker compose -f deploy/compose/compose.yaml down
 
 ## 启动进程
 
-三个后端入口相互独立。`api` 和 `worker` 当前仍只提供健康端点，不会执行 DDL 或暴露未认证业务
-路由。数据库 schema 只能由显式 `migrator` 命令变更：
+三个后端入口相互独立。数据库 schema 只能由显式 `migrator` 命令变更。API 必须显式设置认证
+模式；当前不接 IdP 的本地预览使用 `disabled`，worker 不读取该配置：
 
 ```powershell
 go run ./src/backend/cmd/migrator --up
 go run ./src/backend/cmd/migrator --status
+$env:MAIL_SUITE_AUTH_MODE = "disabled"
 go run ./src/backend/cmd/api
 go run ./src/backend/cmd/worker
 go run ./src/backend/cmd/migrator --check-config
@@ -75,6 +76,44 @@ corepack pnpm --dir src/web dev
 `http://127.0.0.1:5173`。可以通过 `MAIL_SUITE_HTTP_ADDRESS`、
 `MAIL_SUITE_SHUTDOWN_TIMEOUT`、`MAIL_SUITE_PROBE_TIMEOUT` 和
 `MAIL_SUITE_OTEL_EXPORTER_OTLP_ENDPOINT` 覆盖非敏感运行参数。
+
+## OIDC 服务端模式
+
+`MAIL_SUITE_AUTH_MODE=disabled` 不注册认证路由，只用于当前回环预览。启用 OIDC 时必须显式使用
+`oidc`，并完整注入以下运行时配置；缺少配置、discovery 失败或 provider 不支持
+Authorization Code + PKCE S256 时 API 启动失败，不会回退到 `disabled`：
+
+| 环境变量                                     | 约束                                                              |
+| -------------------------------------------- | ----------------------------------------------------------------- |
+| `MAIL_SUITE_OIDC_ISSUER`                     | 精确匹配 discovery 的 HTTPS issuer                                |
+| `MAIL_SUITE_OIDC_CLIENT_ID`                  | 机密后端 OIDC client 标识                                         |
+| `MAIL_SUITE_OIDC_CLIENT_SECRET`              | 仅从部署 secret 注入，不写入仓库                                  |
+| `MAIL_SUITE_OIDC_REDIRECT_URI`               | 与主站同源的 `https://.../api/v1/auth/callback`                    |
+| `MAIL_SUITE_AUTH_TRUSTED_ORIGIN`             | 无路径的 HTTPS 主站 origin，用于 Origin/Referer 校验               |
+| `MAIL_SUITE_OIDC_SCOPES`                     | 默认 `openid profile email`，必须包含 `openid`                    |
+| `MAIL_SUITE_OIDC_SIGNING_ALGORITHMS`         | 默认且建议 `RS256`；可选集合仅允许 `RS256`、`PS256`、`ES256`       |
+| `MAIL_SUITE_OIDC_ADMIN_ALLOWED_ACR`          | 管理账号允许的 MFA `acr`，与 AMR 策略至少配置一项                  |
+| `MAIL_SUITE_OIDC_ADMIN_REQUIRED_AMR`         | 管理账号必须全部具备的 `amr` 方法                                 |
+| `MAIL_SUITE_AUTH_SECRET_PEPPER`              | 标准 Base64，解码后至少 32 字节                                   |
+| `MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY`        | 标准 Base64，解码后必须为 32 字节 AES-256 key                     |
+| `MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY_ID`     | 当前非秘密密钥版本标识                                            |
+| `MAIL_SUITE_OIDC_PROVIDER_TIMEOUT`           | 默认 `5s`，大于零且不超过 `30s`                                  |
+
+PowerShell 可在当前终端生成两个独立测试 secret；不要把输出写入 Git、命令记录文档或聊天：
+
+```powershell
+function New-MailSuiteSecret {
+  $bytes = [byte[]]::new(32)
+  [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  [Convert]::ToBase64String($bytes)
+}
+$env:MAIL_SUITE_AUTH_SECRET_PEPPER = New-MailSuiteSecret
+$env:MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY = New-MailSuiteSecret
+```
+
+OIDC 模式注册 `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、
+`GET /api/v1/session` 和 `POST /api/v1/auth/logout`。会话只使用 Secure、HttpOnly、SameSite=Lax 的
+`__Host-` Cookie，因此启用时必须由同源 HTTPS 入口代理，不能直接用明文 HTTP 验收登录。
 
 ## 完整验证
 
@@ -135,5 +174,6 @@ Web 容器监听 `8080`，并通过 `MAIL_SUITE_API_UPSTREAM` 指定同源 `/hea
 ## 单节点测试服务器部署
 
 Ubuntu 24.04 测试主机的固定运行时版本、最小防火墙、资源限制、部署、验证和回滚命令见
-[单节点测试服务器部署](deploy/server/README.md)。当前服务器编排只提供数据库、内部健康服务和本机
-预览入口，不包含 mail-core，也不表示 SMTP 收件、OIDC 或邮件管理能力已经完成。
+[单节点测试服务器部署](deploy/server/README.md)。当前服务器编排显式使用 `disabled` 认证模式，只提供
+数据库、内部健康服务和本机预览入口；它不包含 IdP、TLS 或 mail-core，也不表示 SMTP 收件、OIDC
+端到端登录或邮件管理能力已经完成。

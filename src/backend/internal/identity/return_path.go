@@ -12,36 +12,36 @@ const maximumReturnPathBytes = 2048
 // NormalizeReturnPath 校验并返回只能落在邮箱端或管理端的规范站内绝对路径。
 func NormalizeReturnPath(candidate string) (string, error) {
 	if len(candidate) == 0 || len(candidate) > maximumReturnPathBytes || !utf8.ValidString(candidate) {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	if hasControlCharacter(candidate) || strings.Contains(candidate, "\\") {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	lowerCandidate := strings.ToLower(candidate)
 	if strings.Contains(lowerCandidate, "%25") {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	parsed, err := url.ParseRequestURI(candidate)
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.Opaque != "" || parsed.Fragment != "" {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	if !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	lowerEscapedPath := strings.ToLower(parsed.EscapedPath())
 	if strings.Contains(lowerEscapedPath, "%2f") || strings.Contains(lowerEscapedPath, "%5c") {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	if hasControlCharacter(parsed.Path) || strings.Contains(parsed.Path, "\\") || path.Clean(parsed.Path) != parsed.Path {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	if !isProtectedPortalPath(parsed.Path) {
-		return "", NewError(ErrorCodeInvalidRequest)
+		return "", NewError(ErrorCodeInvalidReturnTo)
 	}
 	if parsed.RawQuery != "" {
 		decodedQuery, decodeErr := url.QueryUnescape(parsed.RawQuery)
 		if decodeErr != nil || hasControlCharacter(decodedQuery) || strings.Contains(decodedQuery, "\\") {
-			return "", NewError(ErrorCodeInvalidRequest)
+			return "", NewError(ErrorCodeInvalidReturnTo)
 		}
 	}
 	normalized := parsed.EscapedPath()

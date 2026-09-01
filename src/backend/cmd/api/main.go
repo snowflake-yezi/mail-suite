@@ -8,13 +8,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/snowflake-yezi/mail-suite/src/backend/internal/identity/bootstrap"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/service"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := service.Run(ctx, "api", "127.0.0.1:8080"); err != nil {
+	if err := service.Run(ctx, "api", "127.0.0.1:8080", bootstrap.Routes); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "api 启动或运行失败：", err)
 		os.Exit(1)
 	}
