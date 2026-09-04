@@ -1,8 +1,8 @@
 # mail-suite
 
-`mail-suite` 当前已在工程脚手架上开始实现控制面业务。本仓库提供 Go 控制面进程、React 管理
-工作区、PostgreSQL 开发依赖、邮箱开通意图持久化闭环，以及可显式启用的服务端 OIDC 登录、会话
-查询和本地退出 API；尚未接入前端路由守卫、真实 mail-core 副作用、邮箱投递、邮件读取或高可用能力。
+`mail-suite` 当前已进入控制面业务实现。本仓库提供 Go 控制面进程、React 双端工作区、PostgreSQL
+开发依赖、邮箱开通意图与 operation worker 状态机，以及可显式启用的服务端 OIDC 登录、会话、退出
+和前端路由守卫；真实 mail-core adapter、worker 生产接线、邮箱投递、邮件读取和高可用能力尚未完成。
 
 当前业务契约见
 [邮箱开通意图与 Operation Ledger 需求](docs/requirements/2026-08-31-mailbox-provisioning-intent.md)，
@@ -56,7 +56,7 @@ docker compose -f deploy/compose/compose.yaml down
 
 ## 启动进程
 
-三个后端入口相互独立。数据库 schema 只能由显式 `migrator` 命令变更。API 必须显式设置认证
+四个后端入口相互独立。数据库 schema 只能由显式 `migrator` 命令变更。API 必须显式设置认证
 模式；当前不接 IdP 的本地预览使用 `disabled`，worker 不读取该配置：
 
 ```powershell
@@ -66,11 +66,15 @@ $env:MAIL_SUITE_AUTH_MODE = "disabled"
 go run ./src/backend/cmd/api
 go run ./src/backend/cmd/worker
 go run ./src/backend/cmd/migrator --check-config
+go run ./src/backend/cmd/identity-bootstrap --version
 corepack pnpm --dir src/web dev
 ```
 
 `migrator --down` 只回滚最后一个 migration，会删除对应业务表；仅在明确需要回滚且数据已备份时
 手工执行。应用进程不会自动调用该命令。
+
+当前 `cmd/worker` 仍只运行健康探针外壳。邮箱 operation 的 PostgreSQL repository、lease/attempt
+状态机和 runner 已实现并由测试覆盖，但在真实 Stalwart adapter 与运行配置接入前不会处理外部副作用。
 
 默认地址：API 为 `127.0.0.1:8080`，worker 为 `127.0.0.1:8081`，Web 为
 `http://127.0.0.1:5173`。可以通过 `MAIL_SUITE_HTTP_ADDRESS`、
@@ -115,6 +119,25 @@ OIDC 模式注册 `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、
 `GET /api/v1/session` 和 `POST /api/v1/auth/logout`。会话只使用 Secure、HttpOnly、SameSite=Lax 的
 `__Host-` Cookie，因此启用时必须由同源 HTTPS 入口代理，不能直接用明文 HTTP 验收登录。
 
+## 受控测试身份初始化
+
+固定版本 Keycloak 接入前，可使用独立 `identity-bootstrap` 命令创建本地授权映射。示例
+[`test-identity.example.json`](deploy/identity/test-identity.example.json) 不含秘密，只用于展示结构；执行
+前必须把五个 `subject` 占位值和 issuer 替换成目标 Keycloak realm 的稳定值。测试邮箱域必须保持
+在 `.test` 保留顶级域，禁止填入真实邮箱。
+
+```powershell
+go run ./src/backend/cmd/identity-bootstrap --check --manifest deploy/identity/test-identity.example.json
+go run ./src/backend/cmd/identity-bootstrap --apply --manifest <受控-manifest-路径>
+go run ./src/backend/cmd/identity-bootstrap --remove --manifest <受控-manifest-路径>
+```
+
+`--check` 只校验连接串格式和 manifest，不连接数据库。`--apply` 在单个事务内创建或精确核验
+一个测试租户、域名、两个邮箱、四个主体和两个管理权限；`unmapped_subject` 必须保持未映射。
+重复执行不会更新已有数据，任何稳定字段或权限漂移都会整笔失败。`--remove` 会删除该 fixture 的
+会话和关联认证审计；租户中存在 manifest 之外的域名、邮箱、主体、operation 或 outbox 时拒绝回收。
+该命令不执行 migration，也不会由 API、worker 或部署脚本自动调用。
+
 ## 完整验证
 
 Go 检查：
@@ -132,6 +155,7 @@ go test -race ./...
 go build -o .tmp/bin/api ./src/backend/cmd/api
 go build -o .tmp/bin/worker ./src/backend/cmd/worker
 go build -o .tmp/bin/migrator ./src/backend/cmd/migrator
+go build -o .tmp/bin/identity-bootstrap ./src/backend/cmd/identity-bootstrap
 go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 ```
 
@@ -166,6 +190,7 @@ $goProxy = go env GOPROXY
 docker build -f src/backend/Dockerfile --build-arg SERVICE=api --build-arg GOPROXY=$goProxy --build-arg VERSION=dev --build-arg REVISION=(git rev-parse HEAD) -t mail-suite-api:dev .
 docker build -f src/backend/Dockerfile --build-arg SERVICE=worker --build-arg GOPROXY=$goProxy --build-arg VERSION=dev --build-arg REVISION=(git rev-parse HEAD) -t mail-suite-worker:dev .
 docker build -f src/backend/Dockerfile --build-arg SERVICE=migrator --build-arg GOPROXY=$goProxy --build-arg VERSION=dev --build-arg REVISION=(git rev-parse HEAD) -t mail-suite-migrator:dev .
+docker build -f src/backend/Dockerfile --build-arg SERVICE=identity-bootstrap --build-arg GOPROXY=$goProxy --build-arg VERSION=dev --build-arg REVISION=(git rev-parse HEAD) -t mail-suite-identity-bootstrap:dev .
 docker build -f src/web/Dockerfile --build-arg VERSION=dev --build-arg REVISION=(git rev-parse HEAD) -t mail-suite-web:dev .
 ```
 
@@ -175,5 +200,5 @@ Web 容器监听 `8080`，并通过 `MAIL_SUITE_API_UPSTREAM` 指定同源 `/hea
 
 Ubuntu 24.04 测试主机的固定运行时版本、最小防火墙、资源限制、部署、验证和回滚命令见
 [单节点测试服务器部署](deploy/server/README.md)。当前服务器编排显式使用 `disabled` 认证模式，只提供
-数据库、内部健康服务和本机预览入口；它不包含 IdP、TLS 或 mail-core，也不表示 SMTP 收件、OIDC
-端到端登录或邮件管理能力已经完成。
+数据库、内部健康服务、本机预览入口，以及不开放公网端口的 PostgreSQL 只读 SSH 隧道；它不包含
+IdP、TLS 或 mail-core，也不表示 SMTP 收件、OIDC 端到端登录或邮件管理能力已经完成。
