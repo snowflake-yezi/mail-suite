@@ -58,6 +58,7 @@ deploy_release() {
   fi
   compose up -d postgres
   compose --profile tools run --rm migrator --up
+  bash "${release_dir}/deploy/server/configure-readonly-database.sh" "${release_dir}"
   compose up -d --wait postgres api worker web
   ln -sfn "${release_dir}" "${service_root}/current"
 }
