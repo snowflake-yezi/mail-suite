@@ -1,10 +1,28 @@
-import { LockKeyhole, ShieldCheck } from 'lucide-react'
+import { LockKeyhole, LogIn, RefreshCw, ShieldCheck } from 'lucide-react'
 
 import { AppLogo } from '../components/AppLogo'
 import { ThemeMenu } from '../components/ThemeMenu'
 
-// LoginLayout 渲染统一身份入口；认证 API 未准入时保持按钮不可执行并说明真实状态。
-export function LoginLayout() {
+// LoginLayoutProps 描述登录入口允许保留的站内返回路径和恢复动作。
+interface LoginLayoutProps {
+  returnTo?: string
+  unavailable?: boolean
+  onRetry?: () => void
+}
+
+// LoginLayout 渲染统一身份入口，浏览器只跳转后端而不接触 OIDC token。
+export function LoginLayout({
+  returnTo,
+  unavailable = false,
+  onRetry,
+}: LoginLayoutProps) {
+  const loginParameters = new URLSearchParams()
+  if (returnTo) {
+    loginParameters.set('return_to', returnTo)
+  }
+  const loginQuery = loginParameters.toString()
+  const loginHref = `/api/v1/auth/login${loginQuery ? `?${loginQuery}` : ''}`
+
   return (
     <main className="login-shell">
       <section className="login-brand" aria-label="Mail Suite 品牌">
@@ -32,21 +50,31 @@ export function LoginLayout() {
           <p className="login-panel__copy">
             登录后将根据账号权限进入邮箱或管理控制台。
           </p>
-          <div className="inline-notice" role="status">
+          <div
+            className={`inline-notice ${unavailable ? 'is-error' : 'is-ready'}`}
+            role="status"
+          >
             <span
-              className="status-dot status-dot--warning"
+              className={`status-dot ${unavailable ? 'status-dot--danger' : 'status-dot--success'}`}
               aria-hidden="true"
             />
-            认证服务尚未接入
+            {unavailable ? '登录服务暂时不可用' : '组织身份服务已连接'}
           </div>
-          <button
-            className="primary-button login-button"
-            type="button"
-            disabled
-            title="等待 OIDC 认证服务接入"
-          >
-            使用账号登录
-          </button>
+          {unavailable ? (
+            <button
+              className="primary-button login-button"
+              type="button"
+              onClick={onRetry}
+            >
+              <RefreshCw size={17} aria-hidden="true" />
+              重新连接
+            </button>
+          ) : (
+            <a className="primary-button login-button" href={loginHref}>
+              <LogIn size={17} aria-hidden="true" />
+              使用账号登录
+            </a>
+          )}
           <p className="login-panel__footnote">
             本页面不会收集或保存邮箱密码。
           </p>

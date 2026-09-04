@@ -18,9 +18,9 @@ import {
 import { NavLink } from 'react-router-dom'
 
 import { getServiceHealth } from '../../api/health'
-import { PreviewAccount } from '../../components/PreviewAccount'
 import { ThemeMenu } from '../../components/ThemeMenu'
 import { AdminLayout } from '../../layouts/AdminLayout'
+import { SessionAccount } from '../auth/SessionAccount'
 
 // AdminNavigationItem 描述管理侧栏入口及其当前可用状态。
 interface AdminNavigationItem {
@@ -165,7 +165,7 @@ export function AdminOverview() {
       </label>
       <div className="topbar-actions">
         <ThemeMenu />
-        <PreviewAccount />
+        <SessionAccount />
       </div>
     </header>
   )

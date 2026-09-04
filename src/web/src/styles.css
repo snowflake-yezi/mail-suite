@@ -352,6 +352,30 @@ p {
   gap: 10px;
 }
 
+.session-account-group {
+  display: flex;
+  position: relative;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.session-account-error {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  z-index: 8;
+  width: max-content;
+  max-width: 190px;
+  padding: 6px 8px;
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .status-dot {
   flex: 0 0 8px;
   width: 8px;
@@ -361,6 +385,14 @@ p {
 
 .status-dot--warning {
   background: var(--color-warning);
+}
+
+.status-dot--success {
+  background: var(--color-success);
+}
+
+.status-dot--danger {
+  background: var(--color-danger);
 }
 
 .status-label {
@@ -500,6 +532,18 @@ p {
   border-radius: 6px;
   font-size: 13px;
   font-weight: 650;
+}
+
+.inline-notice.is-ready {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+  border-color: color-mix(in srgb, var(--color-success) 35%, transparent);
+}
+
+.inline-notice.is-error {
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
+  border-color: color-mix(in srgb, var(--color-danger) 35%, transparent);
 }
 
 .login-button {
@@ -1255,6 +1299,16 @@ a.admin-nav__item:hover {
   line-height: 1.7;
 }
 
+.auth-status-page .access-panel__icon.is-loading svg {
+  animation: auth-status-spin 900ms linear infinite;
+}
+
+@keyframes auth-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .fatal-state {
   gap: 18px;
   text-align: center;
@@ -1503,8 +1557,15 @@ a.admin-nav__item:hover {
   }
 
   .mail-topbar .theme-menu,
-  .mail-topbar .icon-button,
+  .mail-topbar .mail-settings-button {
+    display: none;
+  }
+
   .mail-topbar .preview-account {
+    min-width: 34px;
+  }
+
+  .mail-topbar .preview-account > span:last-child {
     display: none;
   }
 
@@ -1547,6 +1608,10 @@ a.admin-nav__item:hover {
 
   .admin-topbar .preview-account > span:last-child {
     display: none;
+  }
+
+  .admin-topbar .session-account-group {
+    gap: 3px;
   }
 
   .admin-page-heading {

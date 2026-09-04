@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { Navigate, NavLink, useParams } from 'react-router-dom'
 
-import { PreviewAccount } from '../../components/PreviewAccount'
+import { SessionAccount } from '../auth/SessionAccount'
 import { ThemeMenu } from '../../components/ThemeMenu'
 import { MailLayout } from '../../layouts/MailLayout'
 
@@ -113,7 +113,7 @@ export function MailWorkspace() {
       <div className="topbar-actions">
         <ThemeMenu />
         <button
-          className="icon-button"
+          className="icon-button mail-settings-button"
           type="button"
           aria-label="邮箱设置"
           title="邮箱服务尚未接入"
@@ -121,7 +121,7 @@ export function MailWorkspace() {
         >
           <Settings size={18} aria-hidden="true" />
         </button>
-        <PreviewAccount />
+        <SessionAccount />
       </div>
     </header>
   )
