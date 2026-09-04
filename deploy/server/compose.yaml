@@ -78,6 +78,38 @@ services:
     mem_limit: 128m
     pids_limit: 64
 
+  identity-bootstrap:
+    image: mail-suite-identity-bootstrap:${MAIL_SUITE_IMAGE_TAG:-test}
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: identity-bootstrap
+        VERSION: ${MAIL_SUITE_VERSION:-test}
+        REVISION: ${MAIL_SUITE_REVISION:-working-tree}
+    environment: *database-environment
+    command: ["--version"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-file: "3"
+        max-size: 10m
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
   api:
     <<: *service-defaults
     image: mail-suite-api:${MAIL_SUITE_IMAGE_TAG:-test}

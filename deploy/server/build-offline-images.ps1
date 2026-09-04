@@ -16,7 +16,7 @@ function BuildOfflineImages {
     $env:MAIL_SUITE_VERSION = "test"
     $env:MAIL_SUITE_REVISION = "working-tree"
     try {
-        docker --config $dockerConfig compose --project-directory . -f $composeFile build api worker migrator web
+        docker --config $dockerConfig compose --project-directory . -f $composeFile build api worker migrator identity-bootstrap web
         if ($LASTEXITCODE -ne 0) { throw "Compose image build failed" }
 
         docker --config $dockerConfig pull $postgresImage
@@ -29,6 +29,7 @@ function BuildOfflineImages {
             "mail-suite-api:$imageTag" `
             "mail-suite-worker:$imageTag" `
             "mail-suite-migrator:$imageTag" `
+            "mail-suite-identity-bootstrap:$imageTag" `
             "mail-suite-web:$imageTag" `
             $postgresAlias
         if ($LASTEXITCODE -ne 0) { throw "Offline image archive export failed" }

@@ -69,6 +69,7 @@ require_preloaded_images() {
     "mail-suite-api:${MAIL_SUITE_IMAGE_TAG}"
     "mail-suite-worker:${MAIL_SUITE_IMAGE_TAG}"
     "mail-suite-migrator:${MAIL_SUITE_IMAGE_TAG}"
+    "mail-suite-identity-bootstrap:${MAIL_SUITE_IMAGE_TAG}"
     "mail-suite-web:${MAIL_SUITE_IMAGE_TAG}"
     "mail-suite-postgres:17.11-alpine-18cfe3ef"
   )
