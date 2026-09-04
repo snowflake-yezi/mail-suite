@@ -127,6 +127,12 @@ type Mailbox struct {
 	CreatedAt pgtype.Timestamptz `db:"created_at" json:"created_at"`
 	// 邮箱期望或观测状态最后更新时间，使用数据库时区时间
 	UpdatedAt pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+	// 最近一次经 mail-core 实际核验的资源版本；尚无可靠观测时为空
+	ObservedRevision pgtype.Int8 `db:"observed_revision" json:"observed_revision"`
+	// 最近一次实际观测配置的 SHA-256 摘要；不保存可逆配置内容
+	ObservedConfigurationHash []byte `db:"observed_configuration_hash" json:"observed_configuration_hash"`
+	// mail-core 完成最近一次可靠状态核验的时间；尚无观测时为空
+	ObservedAt pgtype.Timestamptz `db:"observed_at" json:"observed_at"`
 }
 
 // 跨系统副作用的控制面状态事实源，支持幂等、领取、重试和审计
@@ -141,7 +147,7 @@ type Operation struct {
 	ResourceType string `db:"resource_type" json:"resource_type"`
 	// 目标业务资源稳定标识，本表不建立多态外键
 	ResourceID uuid.UUID `db:"resource_id" json:"resource_id"`
-	// operation 状态：pending、running、succeeded、failed 或 unknown
+	// operation 状态：pending、running、retry_wait、unknown、succeeded、failed、dead 或 superseded
 	Status string `db:"status" json:"status"`
 	// 调用方提供的租户内幂等键，不得包含凭据或业务正文
 	IdempotencyKey string `db:"idempotency_key" json:"idempotency_key"`
@@ -151,6 +157,68 @@ type Operation struct {
 	CreatedAt pgtype.Timestamptz `db:"created_at" json:"created_at"`
 	// operation 状态最后更新时间，重放查询不得修改
 	UpdatedAt pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+	// operation 创建时固定的邮箱期望版本，后续资源变更必须创建新 operation
+	DesiredRevision int64 `db:"desired_revision" json:"desired_revision"`
+	// 本次 operation 期望配置的 SHA-256 摘要，与调用方幂等键相互独立
+	ConfigurationHash []byte `db:"configuration_hash" json:"configuration_hash"`
+	// 已经原子创建的执行 attempt 数量，从 0 开始且只增不减
+	AttemptCount int32 `db:"attempt_count" json:"attempt_count"`
+	// pending、retry_wait 或 unknown 状态下一次允许被 worker 领取的时间
+	NextAttemptAt pgtype.Timestamptz `db:"next_attempt_at" json:"next_attempt_at"`
+	// 当前 running attempt 的 worker 进程标识；非 running 状态必须为空
+	LeaseOwnerID pgtype.UUID `db:"lease_owner_id" json:"lease_owner_id"`
+	// 每次领取单调递增的 fencing token，旧 epoch 回执不得提交
+	LeaseEpoch int64 `db:"lease_epoch" json:"lease_epoch"`
+	// 当前 worker 租约的绝对失效时间；非 running 状态必须为空
+	LeaseExpiresAt pgtype.Timestamptz `db:"lease_expires_at" json:"lease_expires_at"`
+	// 最近一次执行结果的稳定脱敏错误码，不保存地址、凭据或底层响应
+	LastErrorCode pgtype.Text `db:"last_error_code" json:"last_error_code"`
+	// 最近一次 inspect 返回的 mail-core 邮箱状态；未取得证据时为空
+	ObservedStatus pgtype.Text `db:"observed_status" json:"observed_status"`
+	// 最近一次 inspect 返回的资源版本；未取得证据时为空
+	ObservedRevision pgtype.Int8 `db:"observed_revision" json:"observed_revision"`
+	// 最近一次 inspect 返回的配置 SHA-256 摘要；未取得证据时为空
+	ObservedConfigurationHash []byte `db:"observed_configuration_hash" json:"observed_configuration_hash"`
+	// 最近一次 inspect 完成时间；未取得实际证据时为空
+	ObservedAt pgtype.Timestamptz `db:"observed_at" json:"observed_at"`
+}
+
+// operation 每次真实外部调用的追加式审计记录，领取身份创建后不得复用
+type OperationAttempt struct {
+	// 单次执行 attempt 的稳定标识，由数据库生成 UUID
+	ID uuid.UUID `db:"id" json:"id"`
+	// attempt 所属的不可变 operation 标识
+	OperationID uuid.UUID `db:"operation_id" json:"operation_id"`
+	// attempt 所属租户标识，必须与 operation 保持一致
+	TenantID uuid.UUID `db:"tenant_id" json:"tenant_id"`
+	// 同一 operation 内从 1 开始单调递增的执行序号
+	AttemptNumber int32 `db:"attempt_number" json:"attempt_number"`
+	// 领取本次 attempt 的 worker 进程标识，创建后不可改变
+	LeaseOwnerID uuid.UUID `db:"lease_owner_id" json:"lease_owner_id"`
+	// 本次 attempt 持有的 fencing token，创建后不可改变
+	LeaseEpoch int64 `db:"lease_epoch" json:"lease_epoch"`
+	// 领取前 operation 状态，running 或 unknown 接管时用于优先 inspect
+	PriorStatus string `db:"prior_status" json:"prior_status"`
+	// 本次 attempt 固定处理的邮箱期望版本
+	DesiredRevision int64 `db:"desired_revision" json:"desired_revision"`
+	// 本次 attempt 固定处理的期望配置 SHA-256 摘要
+	ConfigurationHash []byte `db:"configuration_hash" json:"configuration_hash"`
+	// 数据库原子领取并创建本次 attempt 的时间
+	StartedAt pgtype.Timestamptz `db:"started_at" json:"started_at"`
+	// 当前 fencing token 成功提交结果的时间；执行中为空
+	CompletedAt pgtype.Timestamptz `db:"completed_at" json:"completed_at"`
+	// attempt 的收敛结果：retry_wait、unknown、succeeded、failed、dead 或 superseded
+	ResultStatus pgtype.Text `db:"result_status" json:"result_status"`
+	// 本次失败或未知结果的稳定脱敏错误码；成功时为空
+	ErrorCode pgtype.Text `db:"error_code" json:"error_code"`
+	// 本次 inspect 实际返回的邮箱状态；未取得证据时为空
+	ObservedStatus pgtype.Text `db:"observed_status" json:"observed_status"`
+	// 本次 inspect 实际返回的资源版本；未取得证据时为空
+	ObservedRevision pgtype.Int8 `db:"observed_revision" json:"observed_revision"`
+	// 本次 inspect 实际返回的配置 SHA-256 摘要；未取得证据时为空
+	ObservedConfigurationHash []byte `db:"observed_configuration_hash" json:"observed_configuration_hash"`
+	// 本次 inspect 完成时间；未取得证据时为空
+	ObservedAt pgtype.Timestamptz `db:"observed_at" json:"observed_at"`
 }
 
 // 与业务意图同事务写入的待分发事件，不作为 operation 状态事实源

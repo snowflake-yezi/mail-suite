@@ -12,9 +12,270 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimMailboxOperation = `-- name: ClaimMailboxOperation :one
+WITH candidate AS (
+    SELECT
+        operations.id,
+        operations.tenant_id,
+        operations.resource_id AS mailbox_id,
+        operations.status AS prior_status,
+        operations.desired_revision,
+        operations.configuration_hash,
+        operations.attempt_count,
+        operations.lease_epoch,
+        mailboxes.domain_id,
+        (mailboxes.local_part || '@' || domains.name)::text AS address
+    FROM operations
+    JOIN mailboxes
+      ON mailboxes.id = operations.resource_id
+     AND mailboxes.tenant_id = operations.tenant_id
+    JOIN domains
+      ON domains.id = mailboxes.domain_id
+     AND domains.tenant_id = mailboxes.tenant_id
+    WHERE operations.kind = 'mailbox.provision'
+      AND operations.resource_type = 'mailbox'
+      AND mailboxes.desired_status = 'active'
+      AND mailboxes.revision = operations.desired_revision
+      AND operations.attempt_count < $1::integer
+      AND (
+          (
+              operations.status IN ('pending', 'retry_wait', 'unknown')
+              AND operations.next_attempt_at <= statement_timestamp()
+          )
+          OR
+          (
+              operations.status = 'running'
+              AND operations.lease_expires_at <= statement_timestamp()
+          )
+      )
+    ORDER BY
+        CASE
+            WHEN operations.status = 'running' THEN operations.lease_expires_at
+            ELSE operations.next_attempt_at
+        END,
+        operations.created_at,
+        operations.id
+    FOR UPDATE OF operations, mailboxes SKIP LOCKED
+    LIMIT 1
+), expired_attempt AS (
+    UPDATE operation_attempts
+    SET completed_at = statement_timestamp(),
+        result_status = 'unknown',
+        error_code = 'WORKER_LEASE_EXPIRED'
+    FROM candidate
+    WHERE candidate.prior_status = 'running'
+      AND operation_attempts.operation_id = candidate.id
+      AND operation_attempts.attempt_number = candidate.attempt_count
+      AND operation_attempts.lease_epoch = candidate.lease_epoch
+      AND operation_attempts.completed_at IS NULL
+    RETURNING operation_attempts.id
+), claimed AS (
+    UPDATE operations
+    SET status = 'running',
+        attempt_count = operations.attempt_count + 1,
+        lease_owner_id = $2::uuid,
+        lease_epoch = operations.lease_epoch + 1,
+        lease_expires_at = statement_timestamp()
+            + $3::bigint * interval '1 microsecond',
+        updated_at = statement_timestamp()
+    FROM candidate
+    WHERE operations.id = candidate.id
+    RETURNING
+        operations.id AS operation_id,
+        operations.tenant_id,
+        candidate.mailbox_id,
+        candidate.domain_id,
+        candidate.address,
+        operations.desired_revision,
+        operations.configuration_hash,
+        operations.attempt_count AS attempt_number,
+        candidate.prior_status,
+        $2::uuid AS lease_owner_id,
+        operations.lease_epoch,
+        operations.lease_expires_at
+), inserted_attempt AS (
+    INSERT INTO operation_attempts (
+        operation_id,
+        tenant_id,
+        attempt_number,
+        lease_owner_id,
+        lease_epoch,
+        prior_status,
+        desired_revision,
+        configuration_hash,
+        started_at
+    )
+    SELECT
+        claimed.operation_id,
+        claimed.tenant_id,
+        claimed.attempt_number,
+        claimed.lease_owner_id,
+        claimed.lease_epoch,
+        claimed.prior_status,
+        claimed.desired_revision,
+        claimed.configuration_hash,
+        statement_timestamp()
+    FROM claimed
+    RETURNING operation_id
+), delivered_wakeup AS (
+    UPDATE outbox_events
+    SET status = 'delivered',
+        attempts = outbox_events.attempts + 1,
+        delivered_at = statement_timestamp()
+    FROM claimed
+    WHERE outbox_events.operation_id = claimed.operation_id
+      AND outbox_events.tenant_id = claimed.tenant_id
+      AND outbox_events.status IN ('pending', 'processing')
+    RETURNING outbox_events.operation_id
+)
+SELECT
+    claimed.operation_id,
+    claimed.tenant_id,
+    claimed.mailbox_id,
+    claimed.domain_id,
+    claimed.address,
+    claimed.desired_revision,
+    claimed.configuration_hash,
+    claimed.attempt_number,
+    claimed.prior_status,
+    claimed.lease_owner_id,
+    claimed.lease_epoch,
+    claimed.lease_expires_at
+FROM claimed
+`
+
+type ClaimMailboxOperationParams struct {
+	MaxAttempts               int32     `db:"max_attempts" json:"max_attempts"`
+	OwnerID                   uuid.UUID `db:"owner_id" json:"owner_id"`
+	LeaseDurationMicroseconds int64     `db:"lease_duration_microseconds" json:"lease_duration_microseconds"`
+}
+
+type ClaimMailboxOperationRow struct {
+	OperationID       uuid.UUID          `db:"operation_id" json:"operation_id"`
+	TenantID          uuid.UUID          `db:"tenant_id" json:"tenant_id"`
+	MailboxID         uuid.UUID          `db:"mailbox_id" json:"mailbox_id"`
+	DomainID          uuid.UUID          `db:"domain_id" json:"domain_id"`
+	Address           string             `db:"address" json:"address"`
+	DesiredRevision   int64              `db:"desired_revision" json:"desired_revision"`
+	ConfigurationHash []byte             `db:"configuration_hash" json:"configuration_hash"`
+	AttemptNumber     int32              `db:"attempt_number" json:"attempt_number"`
+	PriorStatus       string             `db:"prior_status" json:"prior_status"`
+	LeaseOwnerID      uuid.UUID          `db:"lease_owner_id" json:"lease_owner_id"`
+	LeaseEpoch        int64              `db:"lease_epoch" json:"lease_epoch"`
+	LeaseExpiresAt    pgtype.Timestamptz `db:"lease_expires_at" json:"lease_expires_at"`
+}
+
+func (q *Queries) ClaimMailboxOperation(ctx context.Context, arg ClaimMailboxOperationParams) (ClaimMailboxOperationRow, error) {
+	row := q.db.QueryRow(ctx, claimMailboxOperation, arg.MaxAttempts, arg.OwnerID, arg.LeaseDurationMicroseconds)
+	var i ClaimMailboxOperationRow
+	err := row.Scan(
+		&i.OperationID,
+		&i.TenantID,
+		&i.MailboxID,
+		&i.DomainID,
+		&i.Address,
+		&i.DesiredRevision,
+		&i.ConfigurationHash,
+		&i.AttemptNumber,
+		&i.PriorStatus,
+		&i.LeaseOwnerID,
+		&i.LeaseEpoch,
+		&i.LeaseExpiresAt,
+	)
+	return i, err
+}
+
+const finalizeMailboxOperationBeforeClaim = `-- name: FinalizeMailboxOperationBeforeClaim :one
+WITH candidate AS (
+    SELECT
+        operations.id,
+        operations.tenant_id,
+        operations.status AS prior_status,
+        operations.attempt_count,
+        operations.lease_epoch,
+        CASE
+            WHEN mailboxes.revision > operations.desired_revision THEN 'superseded'
+            ELSE 'dead'
+        END::text AS result_status,
+        CASE
+            WHEN mailboxes.revision > operations.desired_revision
+                THEN 'OPERATION_REVISION_SUPERSEDED'
+            ELSE 'WORKER_ATTEMPTS_EXHAUSTED'
+        END::text AS error_code
+    FROM operations
+    JOIN mailboxes
+      ON mailboxes.id = operations.resource_id
+     AND mailboxes.tenant_id = operations.tenant_id
+    WHERE operations.kind = 'mailbox.provision'
+      AND operations.resource_type = 'mailbox'
+      AND operations.status IN ('pending', 'running', 'retry_wait', 'unknown')
+      AND (
+          mailboxes.revision > operations.desired_revision
+          OR (
+              mailboxes.revision = operations.desired_revision
+              AND operations.attempt_count >= $1::integer
+              AND (
+                  operations.status IN ('pending', 'retry_wait', 'unknown')
+                  OR operations.lease_expires_at <= statement_timestamp()
+              )
+          )
+      )
+    ORDER BY
+        CASE WHEN mailboxes.revision > operations.desired_revision THEN 0 ELSE 1 END,
+        operations.created_at,
+        operations.id
+    FOR UPDATE OF operations, mailboxes SKIP LOCKED
+    LIMIT 1
+), completed_attempt AS (
+    UPDATE operation_attempts
+    SET completed_at = statement_timestamp(),
+        result_status = candidate.result_status,
+        error_code = candidate.error_code
+    FROM candidate
+    WHERE candidate.prior_status = 'running'
+      AND operation_attempts.operation_id = candidate.id
+      AND operation_attempts.attempt_number = candidate.attempt_count
+      AND operation_attempts.lease_epoch = candidate.lease_epoch
+      AND operation_attempts.completed_at IS NULL
+    RETURNING operation_attempts.id
+), finalized_operation AS (
+    UPDATE operations
+    SET status = candidate.result_status,
+        next_attempt_at = statement_timestamp(),
+        lease_owner_id = NULL,
+        lease_expires_at = NULL,
+        last_error_code = candidate.error_code,
+        updated_at = statement_timestamp()
+    FROM candidate
+    WHERE operations.id = candidate.id
+    RETURNING operations.id, operations.tenant_id
+), delivered_wakeup AS (
+    UPDATE outbox_events
+    SET status = 'delivered',
+        attempts = outbox_events.attempts + 1,
+        delivered_at = statement_timestamp()
+    FROM finalized_operation
+    WHERE outbox_events.operation_id = finalized_operation.id
+      AND outbox_events.tenant_id = finalized_operation.tenant_id
+      AND outbox_events.status IN ('pending', 'processing')
+    RETURNING outbox_events.operation_id
+)
+SELECT EXISTS (SELECT 1 FROM finalized_operation) AS applied
+`
+
+func (q *Queries) FinalizeMailboxOperationBeforeClaim(ctx context.Context, maxAttempts int32) (bool, error) {
+	row := q.db.QueryRow(ctx, finalizeMailboxOperationBeforeClaim, maxAttempts)
+	var applied bool
+	err := row.Scan(&applied)
+	return applied, err
+}
+
 const getOperationByIdempotencyKey = `-- name: GetOperationByIdempotencyKey :one
 SELECT id, tenant_id, kind, resource_type, resource_id, status, idempotency_key,
-    request_hash, created_at, updated_at
+    request_hash, created_at, updated_at, desired_revision, configuration_hash,
+    attempt_count, next_attempt_at, lease_owner_id, lease_epoch, lease_expires_at,
+    last_error_code, observed_status, observed_revision, observed_configuration_hash,
+    observed_at
 FROM operations
 WHERE tenant_id = $1 AND idempotency_key = $2
 `
@@ -38,13 +299,28 @@ func (q *Queries) GetOperationByIdempotencyKey(ctx context.Context, arg GetOpera
 		&i.RequestHash,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DesiredRevision,
+		&i.ConfigurationHash,
+		&i.AttemptCount,
+		&i.NextAttemptAt,
+		&i.LeaseOwnerID,
+		&i.LeaseEpoch,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.ObservedStatus,
+		&i.ObservedRevision,
+		&i.ObservedConfigurationHash,
+		&i.ObservedAt,
 	)
 	return i, err
 }
 
 const getOperationForTenant = `-- name: GetOperationForTenant :one
 SELECT id, tenant_id, kind, resource_type, resource_id, status, idempotency_key,
-    request_hash, created_at, updated_at
+    request_hash, created_at, updated_at, desired_revision, configuration_hash,
+    attempt_count, next_attempt_at, lease_owner_id, lease_epoch, lease_expires_at,
+    last_error_code, observed_status, observed_revision, observed_configuration_hash,
+    observed_at
 FROM operations
 WHERE tenant_id = $1 AND id = $2
 `
@@ -68,6 +344,18 @@ func (q *Queries) GetOperationForTenant(ctx context.Context, arg GetOperationFor
 		&i.RequestHash,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DesiredRevision,
+		&i.ConfigurationHash,
+		&i.AttemptCount,
+		&i.NextAttemptAt,
+		&i.LeaseOwnerID,
+		&i.LeaseEpoch,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.ObservedStatus,
+		&i.ObservedRevision,
+		&i.ObservedConfigurationHash,
+		&i.ObservedAt,
 	)
 	return i, err
 }
@@ -117,7 +405,20 @@ type InsertMailboxParams struct {
 	DisplayName pgtype.Text `db:"display_name" json:"display_name"`
 }
 
-func (q *Queries) InsertMailbox(ctx context.Context, arg InsertMailboxParams) (Mailbox, error) {
+type InsertMailboxRow struct {
+	ID             uuid.UUID          `db:"id" json:"id"`
+	TenantID       uuid.UUID          `db:"tenant_id" json:"tenant_id"`
+	DomainID       uuid.UUID          `db:"domain_id" json:"domain_id"`
+	LocalPart      string             `db:"local_part" json:"local_part"`
+	DisplayName    pgtype.Text        `db:"display_name" json:"display_name"`
+	DesiredStatus  string             `db:"desired_status" json:"desired_status"`
+	ObservedStatus string             `db:"observed_status" json:"observed_status"`
+	Revision       int64              `db:"revision" json:"revision"`
+	CreatedAt      pgtype.Timestamptz `db:"created_at" json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+}
+
+func (q *Queries) InsertMailbox(ctx context.Context, arg InsertMailboxParams) (InsertMailboxRow, error) {
 	row := q.db.QueryRow(ctx, insertMailbox,
 		arg.ID,
 		arg.TenantID,
@@ -125,7 +426,7 @@ func (q *Queries) InsertMailbox(ctx context.Context, arg InsertMailboxParams) (M
 		arg.LocalPart,
 		arg.DisplayName,
 	)
-	var i Mailbox
+	var i InsertMailboxRow
 	err := row.Scan(
 		&i.ID,
 		&i.TenantID,
@@ -150,7 +451,9 @@ INSERT INTO operations (
     resource_id,
     status,
     idempotency_key,
-    request_hash
+    request_hash,
+    desired_revision,
+    configuration_hash
 ) VALUES (
     $1,
     $2,
@@ -159,11 +462,16 @@ INSERT INTO operations (
     $3,
     'pending',
     $4,
+    $5,
+    1,
     $5
 )
 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 RETURNING id, tenant_id, kind, resource_type, resource_id, status, idempotency_key,
-    request_hash, created_at, updated_at
+    request_hash, created_at, updated_at, desired_revision, configuration_hash,
+    attempt_count, next_attempt_at, lease_owner_id, lease_epoch, lease_expires_at,
+    last_error_code, observed_status, observed_revision, observed_configuration_hash,
+    observed_at
 `
 
 type InsertOperationParams struct {
@@ -194,6 +502,18 @@ func (q *Queries) InsertOperation(ctx context.Context, arg InsertOperationParams
 		&i.RequestHash,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DesiredRevision,
+		&i.ConfigurationHash,
+		&i.AttemptCount,
+		&i.NextAttemptAt,
+		&i.LeaseOwnerID,
+		&i.LeaseEpoch,
+		&i.LeaseExpiresAt,
+		&i.LastErrorCode,
+		&i.ObservedStatus,
+		&i.ObservedRevision,
+		&i.ObservedConfigurationHash,
+		&i.ObservedAt,
 	)
 	return i, err
 }
@@ -225,4 +545,163 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 		arg.Payload,
 	)
 	return err
+}
+
+const resolveMailboxOperation = `-- name: ResolveMailboxOperation :one
+WITH candidate AS (
+    SELECT
+        operations.id,
+        operations.tenant_id,
+        operations.resource_id,
+        operations.desired_revision,
+        operations.configuration_hash
+    FROM operations
+    JOIN mailboxes
+      ON mailboxes.id = operations.resource_id
+     AND mailboxes.tenant_id = operations.tenant_id
+    WHERE operations.id = $1::uuid
+      AND operations.status = 'running'
+      AND operations.lease_owner_id = $2::uuid
+      AND operations.lease_epoch = $3::bigint
+      AND operations.attempt_count = $4::integer
+      AND operations.desired_revision = $5::bigint
+      AND operations.lease_expires_at > statement_timestamp()
+      AND (
+          NOT $6::boolean
+          OR $7::uuid = operations.resource_id
+      )
+      AND (
+          $8::text <> 'succeeded'
+          OR (
+              $6::boolean
+              AND $9::text = 'active'
+              AND $10::bigint = operations.desired_revision
+              AND $11::bytea = operations.configuration_hash
+              AND mailboxes.revision = operations.desired_revision
+              AND mailboxes.desired_status = 'active'
+          )
+      )
+    FOR UPDATE OF operations, mailboxes
+), updated_mailbox AS (
+    UPDATE mailboxes
+    SET observed_status = 'active',
+        observed_revision = $10::bigint,
+        observed_configuration_hash = $11::bytea,
+        observed_at = $12::timestamptz,
+        updated_at = statement_timestamp()
+    FROM candidate
+    WHERE $8::text = 'succeeded'
+      AND mailboxes.id = candidate.resource_id
+      AND mailboxes.tenant_id = candidate.tenant_id
+      AND mailboxes.revision = candidate.desired_revision
+    RETURNING mailboxes.id
+), updated_operation AS (
+    UPDATE operations
+    SET status = $8::text,
+        next_attempt_at = CASE
+            WHEN $8::text IN ('retry_wait', 'unknown')
+                THEN statement_timestamp()
+                    + $13::bigint * interval '1 microsecond'
+            ELSE statement_timestamp()
+        END,
+        lease_owner_id = NULL,
+        lease_expires_at = NULL,
+        last_error_code = NULLIF($14::text, ''),
+        observed_status = CASE
+            WHEN $6::boolean THEN $9::text
+            ELSE operations.observed_status
+        END,
+        observed_revision = CASE
+            WHEN $6::boolean THEN $10::bigint
+            ELSE operations.observed_revision
+        END,
+        observed_configuration_hash = CASE
+            WHEN $6::boolean
+                THEN $11::bytea
+            ELSE operations.observed_configuration_hash
+        END,
+        observed_at = CASE
+            WHEN $6::boolean THEN $12::timestamptz
+            ELSE operations.observed_at
+        END,
+        updated_at = statement_timestamp()
+    FROM candidate
+    WHERE operations.id = candidate.id
+      AND (
+          $8::text <> 'succeeded'
+          OR EXISTS (SELECT 1 FROM updated_mailbox)
+      )
+    RETURNING operations.id
+), updated_attempt AS (
+    UPDATE operation_attempts
+    SET completed_at = statement_timestamp(),
+        result_status = $8::text,
+        error_code = NULLIF($14::text, ''),
+        observed_status = CASE
+            WHEN $6::boolean THEN $9::text
+            ELSE NULL
+        END,
+        observed_revision = CASE
+            WHEN $6::boolean THEN $10::bigint
+            ELSE NULL
+        END,
+        observed_configuration_hash = CASE
+            WHEN $6::boolean
+                THEN $11::bytea
+            ELSE NULL
+        END,
+        observed_at = CASE
+            WHEN $6::boolean THEN $12::timestamptz
+            ELSE NULL
+        END
+    FROM updated_operation
+    WHERE operation_attempts.operation_id = updated_operation.id
+      AND operation_attempts.attempt_number = $4::integer
+      AND operation_attempts.lease_owner_id = $2::uuid
+      AND operation_attempts.lease_epoch = $3::bigint
+      AND operation_attempts.completed_at IS NULL
+    RETURNING operation_attempts.id
+)
+SELECT
+    EXISTS (SELECT 1 FROM updated_operation)
+    AND EXISTS (SELECT 1 FROM updated_attempt) AS applied
+`
+
+type ResolveMailboxOperationParams struct {
+	OperationID                  uuid.UUID          `db:"operation_id" json:"operation_id"`
+	LeaseOwnerID                 uuid.UUID          `db:"lease_owner_id" json:"lease_owner_id"`
+	LeaseEpoch                   int64              `db:"lease_epoch" json:"lease_epoch"`
+	AttemptNumber                int32              `db:"attempt_number" json:"attempt_number"`
+	DesiredRevision              int64              `db:"desired_revision" json:"desired_revision"`
+	HasObservation               bool               `db:"has_observation" json:"has_observation"`
+	ObservedMailboxID            uuid.UUID          `db:"observed_mailbox_id" json:"observed_mailbox_id"`
+	ResultStatus                 string             `db:"result_status" json:"result_status"`
+	ObservedStatus               string             `db:"observed_status" json:"observed_status"`
+	ObservedRevision             int64              `db:"observed_revision" json:"observed_revision"`
+	ObservedConfigurationHash    []byte             `db:"observed_configuration_hash" json:"observed_configuration_hash"`
+	ObservedAt                   pgtype.Timestamptz `db:"observed_at" json:"observed_at"`
+	NextAttemptDelayMicroseconds int64              `db:"next_attempt_delay_microseconds" json:"next_attempt_delay_microseconds"`
+	ErrorCode                    string             `db:"error_code" json:"error_code"`
+}
+
+func (q *Queries) ResolveMailboxOperation(ctx context.Context, arg ResolveMailboxOperationParams) (pgtype.Bool, error) {
+	row := q.db.QueryRow(ctx, resolveMailboxOperation,
+		arg.OperationID,
+		arg.LeaseOwnerID,
+		arg.LeaseEpoch,
+		arg.AttemptNumber,
+		arg.DesiredRevision,
+		arg.HasObservation,
+		arg.ObservedMailboxID,
+		arg.ResultStatus,
+		arg.ObservedStatus,
+		arg.ObservedRevision,
+		arg.ObservedConfigurationHash,
+		arg.ObservedAt,
+		arg.NextAttemptDelayMicroseconds,
+		arg.ErrorCode,
+	)
+	var applied pgtype.Bool
+	err := row.Scan(&applied)
+	return applied, err
 }
