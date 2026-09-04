@@ -1,0 +1,20 @@
+From: sender@outside.test
+To: receiver@mail-suite.test
+Subject: Mail Suite PoC
+Message-ID: <mail-suite-poc-001@mail-suite.test>
+Date: Wed, 02 Sep 2026 08:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mail-suite-poc-boundary"
+
+--mail-suite-poc-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+This message belongs only to the isolated Mail Suite Stalwart PoC.
+--mail-suite-poc-boundary
+Content-Type: text/plain; name="evidence.txt"
+Content-Disposition: attachment; filename="evidence.txt"
+Content-Transfer-Encoding: base64
+
+TWFpbCBTdWl0ZSBQb0MgYXR0YWNobWVudC4NCg==
+--mail-suite-poc-boundary--

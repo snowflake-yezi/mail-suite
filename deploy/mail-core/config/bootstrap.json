@@ -1,0 +1,6 @@
+{
+  "serverHostname": "mx.mail-suite.test",
+  "defaultDomain": "mail-suite.test",
+  "requestTlsCertificate": false,
+  "generateDkimKeys": false
+}

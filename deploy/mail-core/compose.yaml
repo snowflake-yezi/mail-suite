@@ -1,0 +1,28 @@
+services:
+  stalwart:
+    image: ghcr.io/stalwartlabs/stalwart:v0.16.19@sha256:34e59515ef633e2353abbd9a12b0a232eb2174df9ac1ee820ed13e952cfd801d
+    platform: linux/amd64
+    environment:
+      STALWART_PUBLIC_URL: ${MAIL_CORE_PUBLIC_URL:-https://mx.mail-suite.test:28443}
+      STALWART_RECOVERY_ADMIN: ${MAIL_CORE_RECOVERY_ADMIN:-}
+    ports:
+      - "127.0.0.1:${MAIL_CORE_SMTP_PORT:-20025}:25"
+      - "127.0.0.1:${MAIL_CORE_HTTPS_PORT:-28443}:443"
+      - "127.0.0.1:${MAIL_CORE_RECOVERY_PORT:-28080}:8080"
+    volumes:
+      - stalwart_config:/etc/stalwart
+      - stalwart_data:/var/lib/stalwart
+    init: true
+    restart: "no"
+    stop_grace_period: 30s
+
+  cli:
+    profiles: ["tools"]
+    image: ghcr.io/stalwartlabs/cli:1.0.12@sha256:8831cc276c22e334bcf473fc7d28e21248d748c4bc1dac43c83738d3cbd3a9d5
+    platform: linux/amd64
+    init: true
+    restart: "no"
+
+volumes:
+  stalwart_config:
+  stalwart_data:
