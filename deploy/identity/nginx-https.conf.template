@@ -1,0 +1,32 @@
+server {
+  listen 8443 ssl;
+  server_name mail.127-0-0-1.sslip.io;
+
+  ssl_certificate /run/identity-web-tls/server.crt;
+  ssl_certificate_key /run/identity-web-tls/server.key;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_session_tickets off;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  location /health/ {
+    proxy_pass ${MAIL_SUITE_API_UPSTREAM};
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location /api/ {
+    proxy_pass ${MAIL_SUITE_API_UPSTREAM};
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}

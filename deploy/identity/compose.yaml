@@ -1,0 +1,324 @@
+name: ${COMPOSE_PROJECT_NAME:?请先运行 prepare-local.ps1 生成隔离项目名}
+
+x-service-defaults: &service-defaults
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: local
+    options:
+      max-file: "2"
+      max-size: 5m
+
+x-control-database-environment: &control-database-environment
+  MAIL_SUITE_DATABASE_URL: postgres://mail_suite:${MAIL_SUITE_CONTROL_DB_PASSWORD:?缺少控制库密码}@control-postgres:5432/mail_suite?sslmode=disable
+
+services:
+  identity-tls:
+    image: postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        rm -f /keycloak/server.crt /keycloak/server.key /web/server.crt /web/server.key /api/ca.crt /realm/mail-suite-local-realm.json /manifest/test-identity.json
+        cp /source/tls/keycloak/server.crt /keycloak/server.crt
+        cp /source/tls/keycloak/server.key /keycloak/server.key
+        cp /source/tls/web/server.crt /web/server.crt
+        cp /source/tls/web/server.key /web/server.key
+        cp /source/tls/keycloak/ca.crt /api/ca.crt
+        cp /source/realm/mail-suite-local-realm.json /realm/mail-suite-local-realm.json
+        cp /source/test-identity.json /manifest/test-identity.json
+        chmod 0444 /keycloak/server.crt /web/server.crt /api/ca.crt /manifest/test-identity.json
+        chmod 0400 /keycloak/server.key /web/server.key /realm/mail-suite-local-realm.json
+        chown 1000:0 /keycloak/server.crt /keycloak/server.key
+        chown 101:101 /web/server.crt /web/server.key
+        chown 65532:65532 /api/ca.crt
+        chown 1000:0 /realm/mail-suite-local-realm.json
+        chown 65532:65532 /manifest/test-identity.json
+    volumes:
+      - ${MAIL_SUITE_IDENTITY_RUNTIME_DIR:?缺少身份运行目录}:/source:ro
+      - keycloak-tls:/keycloak
+      - web-tls:/web
+      - api-idp-trust:/api
+      - keycloak-realm:/realm
+      - identity-manifest:/manifest
+    networks:
+      - identity-backend
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    cpus: 0.25
+    mem_limit: 64m
+    pids_limit: 32
+
+  control-postgres:
+    <<: *service-defaults
+    image: postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: mail_suite
+      POSTGRES_USER: mail_suite
+      POSTGRES_PASSWORD: ${MAIL_SUITE_CONTROL_DB_PASSWORD:?缺少控制库密码}
+    volumes:
+      - control-postgres-data:/var/lib/postgresql/data
+    networks:
+      - identity-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    cpus: 0.5
+    mem_limit: 384m
+    pids_limit: 128
+
+  keycloak-postgres:
+    <<: *service-defaults
+    image: postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${MAIL_SUITE_KEYCLOAK_DB_PASSWORD:?缺少 Keycloak 数据库密码}
+    volumes:
+      - keycloak-postgres-data:/var/lib/postgresql/data
+    networks:
+      - identity-backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    cpus: 0.5
+    mem_limit: 384m
+    pids_limit: 128
+
+  keycloak:
+    <<: *service-defaults
+    image: ${MAIL_SUITE_KEYCLOAK_IMAGE:?Keycloak 镜像必须包含固定版本 tag 和 sha256 digest}
+    user: "1000:0"
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-postgres:5432/keycloak # gitleaks:allow
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${MAIL_SUITE_KEYCLOAK_DB_PASSWORD:?缺少 Keycloak 数据库密码}
+      KC_BOOTSTRAP_ADMIN_USERNAME: local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${MAIL_SUITE_KEYCLOAK_ADMIN_PASSWORD:?缺少 Keycloak 管理密码}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "false"
+      KC_HOSTNAME: https://idp.127-0-0-1.sslip.io:18443
+      KC_HTTPS_PORT: "18443"
+      KC_HTTPS_CERTIFICATE_FILE: /run/identity-keycloak-tls/server.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /run/identity-keycloak-tls/server.key
+    command: ["start-dev", "--import-realm"]
+    depends_on:
+      identity-tls:
+        condition: service_completed_successfully
+      keycloak-postgres:
+        condition: service_healthy
+    volumes:
+      - keycloak-tls:/run/identity-keycloak-tls:ro
+      - keycloak-realm:/opt/keycloak/data/import:ro
+    ports:
+      - 127.0.0.1:18443:18443
+    networks:
+      identity-backend:
+        aliases:
+          - idp.127-0-0-1.sslip.io
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/18443'"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 20s
+    cpus: 1.0
+    mem_limit: 768m
+    pids_limit: 256
+
+  migrator:
+    image: ${COMPOSE_PROJECT_NAME}-migrator:local
+    build:
+      context: ../..
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: migrator
+        VERSION: local-identity
+        REVISION: working-tree
+    environment: *control-database-environment
+    command: ["--status"]
+    depends_on:
+      control-postgres:
+        condition: service_healthy
+    networks:
+      - identity-backend
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
+  identity-bootstrap:
+    image: ${COMPOSE_PROJECT_NAME}-identity-bootstrap:local
+    build:
+      context: ../..
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: identity-bootstrap
+        VERSION: local-identity
+        REVISION: working-tree
+    environment: *control-database-environment
+    command: ["--check", "--manifest", "/run/identity/test-identity.json"]
+    depends_on:
+      control-postgres:
+        condition: service_healthy
+    volumes:
+      - identity-manifest:/run/identity:ro
+    networks:
+      - identity-backend
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+
+  issuer-probe:
+    image: postgres:17.11-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - wget --ca-certificate=/run/identity-idp-trust/ca.crt -q -O - https://idp.127-0-0-1.sslip.io:18443/realms/mail-suite-local/.well-known/openid-configuration
+    depends_on:
+      identity-tls:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    volumes:
+      - api-idp-trust:/run/identity-idp-trust:ro
+    networks:
+      - identity-backend
+    profiles:
+      - tools
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: 0.1
+    mem_limit: 32m
+    pids_limit: 16
+
+  api:
+    <<: *service-defaults
+    image: ${COMPOSE_PROJECT_NAME}-api:local
+    build:
+      context: ../..
+      dockerfile: src/backend/Dockerfile
+      args:
+        SERVICE: api
+        VERSION: local-identity
+        REVISION: working-tree
+    environment:
+      <<: *control-database-environment
+      MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8080
+      MAIL_SUITE_AUTH_MODE: oidc
+      MAIL_SUITE_OIDC_ISSUER: https://idp.127-0-0-1.sslip.io:18443/realms/mail-suite-local
+      MAIL_SUITE_OIDC_CLIENT_ID: mail-suite-local
+      MAIL_SUITE_OIDC_CLIENT_SECRET: ${MAIL_SUITE_OIDC_CLIENT_SECRET:?缺少 OIDC client secret}
+      MAIL_SUITE_OIDC_REDIRECT_URI: https://mail.127-0-0-1.sslip.io:18444/api/v1/auth/callback
+      MAIL_SUITE_AUTH_TRUSTED_ORIGIN: https://mail.127-0-0-1.sslip.io:18444
+      MAIL_SUITE_OIDC_SCOPES: openid profile email
+      MAIL_SUITE_OIDC_SIGNING_ALGORITHMS: RS256
+      MAIL_SUITE_OIDC_ADMIN_REQUIRED_AMR: otp
+      MAIL_SUITE_AUTH_SECRET_PEPPER: ${MAIL_SUITE_AUTH_SECRET_PEPPER:?缺少会话摘要 pepper}
+      MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY: ${MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY:?缺少 PKCE 加密密钥}
+      MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY_ID: local-key-1
+      MAIL_SUITE_OIDC_PROVIDER_TIMEOUT: 5s
+      SSL_CERT_FILE: /run/identity-idp-trust/ca.crt
+    depends_on:
+      identity-tls:
+        condition: service_completed_successfully
+      control-postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    volumes:
+      - api-idp-trust:/run/identity-idp-trust:ro
+    expose:
+      - "8080"
+    networks:
+      - identity-backend
+      - identity-edge
+    read_only: true
+    cpus: 0.5
+    mem_limit: 192m
+    pids_limit: 96
+
+  web:
+    <<: *service-defaults
+    image: ${COMPOSE_PROJECT_NAME}-web:local
+    build:
+      context: ../..
+      dockerfile: src/web/Dockerfile
+      args:
+        VERSION: local-identity
+        REVISION: working-tree
+    environment:
+      MAIL_SUITE_API_UPSTREAM: http://api:8080
+    depends_on:
+      identity-tls:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+    volumes:
+      - ./nginx-https.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - web-tls:/run/identity-web-tls:ro
+    ports:
+      - 127.0.0.1:18444:8443
+    networks:
+      - identity-edge
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-check-certificate -q -O /dev/null https://127.0.0.1:8443/health/ready",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    tmpfs:
+      - /run:uid=101,gid=101,mode=0755
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+    cpus: 0.25
+    mem_limit: 96m
+    pids_limit: 64
+
+networks:
+  identity-backend:
+    internal: true
+  identity-edge:
+
+volumes:
+  control-postgres-data:
+  keycloak-postgres-data:
+  keycloak-tls:
+  web-tls:
+  api-idp-trust:
+  keycloak-realm:
+  identity-manifest:
