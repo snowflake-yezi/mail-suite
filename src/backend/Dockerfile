@@ -11,7 +11,7 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN GOPROXY="${GOPROXY}" go mod download
 COPY src/backend ./src/backend
-RUN case "${SERVICE}" in api|worker|migrator) ;; *) exit 2 ;; esac && \
+RUN case "${SERVICE}" in api|worker|migrator|identity-bootstrap) ;; *) exit 2 ;; esac && \
     CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -trimpath \
       -ldflags="-s -w -X github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/buildinfo.Version=${VERSION} -X github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/buildinfo.Commit=${REVISION}" \
