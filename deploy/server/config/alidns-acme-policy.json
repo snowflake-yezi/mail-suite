@@ -1,0 +1,15 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "alidns:AddDomainRecord",
+        "alidns:DeleteDomainRecord",
+        "alidns:DescribeDomainRecordInfo",
+        "alidns:DescribeDomainRecords"
+      ],
+      "Resource": "acs:alidns::<ALIYUN_ACCOUNT_ID>:domain/snowye.fun"
+    }
+  ]
+}

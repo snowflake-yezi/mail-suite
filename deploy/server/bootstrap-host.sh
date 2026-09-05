@@ -4,6 +4,10 @@ set -Eeuo pipefail
 readonly docker_version="29.1.3-0ubuntu3~24.04.2"
 readonly compose_version="2.40.3+ds1-0ubuntu1~24.04.1"
 readonly buildx_version="0.30.1-0ubuntu1~24.04.1"
+readonly certbot_version="2.9.0-1"
+readonly jq_version="1.7.1-3ubuntu0.24.04.2"
+readonly dnsutils_version="1:9.18.39-0ubuntu0.24.04.7"
+readonly python_version="3.12.3-0ubuntu2.1"
 readonly service_root="/opt/mail-suite"
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly release_root="$(cd "${script_dir}/../.." && pwd)"
@@ -43,7 +47,11 @@ install_runtime() {
   DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y \
     "docker.io=${docker_version}" \
     "docker-compose-v2=${compose_version}" \
-    "docker-buildx=${buildx_version}"
+    "docker-buildx=${buildx_version}" \
+    "certbot=${certbot_version}" \
+    "jq=${jq_version}" \
+    "bind9-dnsutils=${dnsutils_version}" \
+    "python3=${python_version}"
 
   install -d -o root -g root -m 0755 /etc/docker
   daemon_config="$(mktemp)"

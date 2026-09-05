@@ -1,0 +1,143 @@
+resolver 127.0.0.11 valid=10s ipv6=off;
+
+upstream mail_suite_api {
+  zone mail_suite_api 64k;
+  server api:8080 resolve;
+}
+
+upstream mail_suite_keycloak {
+  zone mail_suite_keycloak 64k;
+  server keycloak:8080 resolve;
+}
+
+limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=idp_limit:10m rate=30r/m;
+
+server {
+  listen 8080 default_server;
+  server_name mail.test.snowye.fun idp.test.snowye.fun;
+  server_tokens off;
+
+  location ^~ /.well-known/acme-challenge/ {
+    root /var/www/certbot;
+    default_type text/plain;
+    try_files $uri =404;
+  }
+
+  location / {
+    return 301 https://$host$request_uri;
+  }
+}
+
+server {
+  listen 443 ssl default_server;
+  listen 8443 ssl default_server;
+  server_name _;
+  server_tokens off;
+
+  ssl_certificate /run/public-tls/mail.test.snowye.fun/fullchain.pem;
+  ssl_certificate_key /run/public-tls/mail.test.snowye.fun/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_session_tickets off;
+
+  return 421;
+}
+
+server {
+  listen 443 ssl;
+  listen 8443 ssl;
+  server_name mail.test.snowye.fun;
+  server_tokens off;
+
+  ssl_certificate /run/public-tls/mail.test.snowye.fun/fullchain.pem;
+  ssl_certificate_key /run/public-tls/mail.test.snowye.fun/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_session_tickets off;
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  location /health/ {
+    proxy_pass http://mail_suite_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location ^~ /api/v1/auth/ {
+    limit_req zone=auth_limit burst=10 nodelay;
+    proxy_pass http://mail_suite_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location /api/ {
+    proxy_pass http://mail_suite_api;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+}
+
+server {
+  listen 443 ssl;
+  listen 8443 ssl;
+  server_name idp.test.snowye.fun;
+  server_tokens off;
+
+  ssl_certificate /run/public-tls/idp.test.snowye.fun/fullchain.pem;
+  ssl_certificate_key /run/public-tls/idp.test.snowye.fun/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_session_tickets off;
+
+  location = /realms/mail-suite-test {
+    limit_req zone=idp_limit burst=20 nodelay;
+    proxy_pass http://mail_suite_keycloak;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location ^~ /realms/mail-suite-test/ {
+    limit_req zone=idp_limit burst=20 nodelay;
+    proxy_pass http://mail_suite_keycloak;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location ^~ /resources/ {
+    limit_req zone=idp_limit burst=40 nodelay;
+    proxy_pass http://mail_suite_keycloak;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Port 443;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Request-ID $request_id;
+  }
+
+  location / {
+    return 404;
+  }
+}

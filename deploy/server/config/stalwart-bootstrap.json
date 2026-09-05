@@ -1,0 +1,11 @@
+{
+  "serverHostname": "mx1.test.snowye.fun",
+  "defaultDomain": "test.snowye.fun",
+  "requestTlsCertificate": false,
+  "generateDkimKeys": true,
+  "tracer": {
+    "@type": "Stdout",
+    "buffered": false,
+    "ansi": false
+  }
+}

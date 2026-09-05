@@ -40,9 +40,9 @@ services:
       options:
         max-file: "3"
         max-size: 10m
-    cpus: 0.75
-    mem_limit: 512m
-    mem_reservation: 256m
+    cpus: 0.6
+    mem_limit: 384m
+    mem_reservation: 192m
     pids_limit: 128
     shm_size: 64m
 
@@ -89,10 +89,17 @@ services:
         VERSION: ${MAIL_SUITE_VERSION:-test}
         REVISION: ${MAIL_SUITE_REVISION:-working-tree}
     environment: *database-environment
-    command: ["--version"]
+    command: ["--check", "--manifest", "/run/test-identity.json"]
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - type: bind
+        source: /opt/mail-suite/shared/identity/test-identity.json
+        target: /run/test-identity.json
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - backend
     profiles:
@@ -110,6 +117,92 @@ services:
     mem_limit: 128m
     pids_limit: 64
 
+  keycloak:
+    <<: *service-defaults
+    image: mail-suite-keycloak:26.7.3-88943b6a
+    pull_policy: never
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak # gitleaks:allow
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${MAIL_SUITE_KEYCLOAK_DB_PASSWORD:?缺少 Keycloak 数据库密码}
+      KC_BOOTSTRAP_ADMIN_USERNAME: mail-suite-ops
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${MAIL_SUITE_KEYCLOAK_ADMIN_PASSWORD:?缺少 Keycloak 管理密码}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME: https://idp.test.snowye.fun
+      KC_HOSTNAME_STRICT: "true"
+      KC_PROXY_HEADERS: xforwarded
+      JAVA_OPTS_KC_HEAP: -Xms128m -Xmx320m
+    command: ["start", "--import-realm"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: /opt/mail-suite/shared/identity/realm
+        target: /opt/keycloak/data/import
+        read_only: true
+        bind:
+          create_host_path: false
+    expose:
+      - "8080"
+      - "9000"
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          IFS= read -r status <&3 &&
+          [[ "$${status}" == *" 200 "* ]]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 240s
+    cpus: 0.75
+    mem_limit: 512m
+    mem_reservation: 256m
+    pids_limit: 256
+
+  stalwart:
+    <<: *service-defaults
+    image: mail-suite-stalwart:0.16.19-34e59515
+    pull_policy: never
+    environment:
+      STALWART_PUBLIC_URL: https://mx1.test.snowye.fun
+      STALWART_RECOVERY_ADMIN: ${MAIL_SUITE_STALWART_RECOVERY_ADMIN:-}
+      STALWART_HEALTHCHECK_URL: https://127.0.0.1:443/healthz/live
+    volumes:
+      - stalwart-config:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+      - type: bind
+        source: /opt/mail-suite/shared/tls/current/mx1.test.snowye.fun
+        target: /run/public-tls
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "25:25"
+    expose:
+      - "443"
+      - "8080"
+    networks:
+      backend:
+        aliases:
+          - mx1.test.snowye.fun
+      edge:
+    stop_grace_period: 30s
+    cpus: 0.5
+    mem_limit: 320m
+    mem_reservation: 128m
+    pids_limit: 256
+
   api:
     <<: *service-defaults
     image: mail-suite-api:${MAIL_SUITE_IMAGE_TAG:-test}
@@ -124,16 +217,37 @@ services:
     environment:
       <<: *database-environment
       MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8080
-      MAIL_SUITE_AUTH_MODE: disabled
+      MAIL_SUITE_AUTH_MODE: oidc
+      MAIL_SUITE_OIDC_ISSUER: https://idp.test.snowye.fun/realms/mail-suite-test
+      MAIL_SUITE_OIDC_CLIENT_ID: mail-suite-test
+      MAIL_SUITE_OIDC_CLIENT_SECRET: ${MAIL_SUITE_OIDC_CLIENT_SECRET:?缺少 OIDC client secret}
+      MAIL_SUITE_OIDC_REDIRECT_URI: https://mail.test.snowye.fun/api/v1/auth/callback
+      MAIL_SUITE_AUTH_TRUSTED_ORIGIN: https://mail.test.snowye.fun
+      MAIL_SUITE_OIDC_SCOPES: openid profile email
+      MAIL_SUITE_OIDC_SIGNING_ALGORITHMS: RS256
+      MAIL_SUITE_OIDC_ADMIN_REQUIRED_AMR: otp
+      MAIL_SUITE_AUTH_SECRET_PEPPER: ${MAIL_SUITE_AUTH_SECRET_PEPPER:?缺少会话摘要 pepper}
+      MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY: ${MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY:?缺少 PKCE 加密密钥}
+      MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY_ID: test-key-1
+      MAIL_SUITE_OIDC_PROVIDER_TIMEOUT: 5s
     depends_on:
       postgres:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      web:
+        condition: service_started
     expose:
       - "8080"
     networks:
       - backend
-      - edge
     read_only: true
+    healthcheck:
+      test: ["CMD", "/mail-suite", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
     cpus: 0.25
     mem_limit: 128m
     pids_limit: 64
@@ -152,14 +266,46 @@ services:
     environment:
       <<: *database-environment
       MAIL_SUITE_HTTP_ADDRESS: 0.0.0.0:8081
+      MAIL_SUITE_SHUTDOWN_TIMEOUT: 30s
+      MAIL_SUITE_PROBE_TIMEOUT: 5s
+      MAIL_SUITE_MAIL_CORE_MODE: stalwart
+      MAIL_SUITE_WORKER_POLL_INTERVAL: 1s
+      MAIL_SUITE_WORKER_LEASE_DURATION: 30s
+      MAIL_SUITE_WORKER_ATTEMPT_TIMEOUT: 20s
+      MAIL_SUITE_WORKER_LEASE_SAFETY_MARGIN: 5s
+      MAIL_SUITE_WORKER_BASE_RETRY_DELAY: 5s
+      MAIL_SUITE_WORKER_MAX_RETRY_DELAY: 5m
+      MAIL_SUITE_WORKER_MAX_ATTEMPTS: "8"
+      MAIL_SUITE_STALWART_ENDPOINT: https://mx1.test.snowye.fun
+      MAIL_SUITE_STALWART_ADMIN_USERNAME: admin@test.snowye.fun
+      MAIL_SUITE_STALWART_ADMIN_PASSWORD_FILE: /run/mail-suite-secrets/stalwart-admin-password
+      MAIL_SUITE_STALWART_MAILBOX_KEY_FILE: /run/mail-suite-secrets/stalwart-mailbox-key
+      MAIL_SUITE_STALWART_CA_FILE: /etc/ssl/certs/ca-certificates.crt
+      MAIL_SUITE_STALWART_TIMEOUT: 10s
     depends_on:
       postgres:
         condition: service_healthy
+      stalwart:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: /opt/mail-suite/shared/secrets/worker
+        target: /run/mail-suite-secrets
+        read_only: true
+        bind:
+          create_host_path: false
     expose:
       - "8081"
     networks:
       - backend
     read_only: true
+    stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD", "/mail-suite", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
     cpus: 0.25
     mem_limit: 128m
     pids_limit: 64
@@ -174,23 +320,48 @@ services:
       args:
         VERSION: ${MAIL_SUITE_VERSION:-test}
         REVISION: ${MAIL_SUITE_REVISION:-working-tree}
-    environment:
-      MAIL_SUITE_API_UPSTREAM: http://api:8080
     depends_on:
-      api:
-        condition: service_started
+      keycloak:
+        condition: service_healthy
+    volumes:
+      - ./deploy/server/nginx-public.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - type: bind
+        source: /opt/mail-suite/shared/tls/current
+        target: /run/public-tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/mail-suite/shared/acme-webroot
+        target: /var/www/certbot
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
-      - 127.0.0.1:${MAIL_SUITE_PREVIEW_PORT:-18080}:8080
+      - "80:8080"
+      - "443:8443"
+      - "127.0.0.1:${MAIL_SUITE_PREVIEW_PORT:-18444}:8443"
+    expose:
+      - "443"
     networks:
-      - edge
+      backend:
+        aliases:
+          - idp.test.snowye.fun
+          - mail.test.snowye.fun
+      edge:
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health/ready"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null https://mail.test.snowye.fun/health/ready"]
       interval: 10s
       timeout: 3s
-      retries: 12
-      start_period: 15s
+      retries: 18
+      start_period: 30s
     tmpfs:
       - /run:uid=101,gid=101,mode=0755
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     cpus: 0.25
     mem_limit: 96m
     pids_limit: 64
@@ -202,3 +373,5 @@ networks:
 
 volumes:
   postgres-data:
+  stalwart-config:
+  stalwart-data:

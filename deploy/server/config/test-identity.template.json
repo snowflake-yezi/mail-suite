@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "oidc_issuer": "https://idp.test.snowye.fun/realms/mail-suite-test",
+  "tenant": {
+    "id": "replace-at-deploy-time",
+    "name": "Online test tenant"
+  },
+  "domain": {
+    "id": "replace-at-deploy-time",
+    "name": "test.snowye.fun"
+  },
+  "mailbox": {
+    "principal_id": "replace-at-deploy-time",
+    "subject": "replace-at-deploy-time",
+    "mailbox_id": "replace-at-deploy-time",
+    "local_part": "mailbox",
+    "display_name": "Mailbox Fixture"
+  },
+  "administrator": {
+    "principal_id": "replace-at-deploy-time",
+    "subject": "replace-at-deploy-time",
+    "display_name": "Administrator Fixture"
+  },
+  "suspended": {
+    "principal_id": "replace-at-deploy-time",
+    "subject": "replace-at-deploy-time",
+    "mailbox_id": "replace-at-deploy-time",
+    "local_part": "suspended",
+    "display_name": "Suspended Fixture"
+  },
+  "mfa_insufficient": {
+    "principal_id": "replace-at-deploy-time",
+    "subject": "replace-at-deploy-time",
+    "display_name": "MFA Insufficient Fixture"
+  },
+  "unmapped_subject": "replace-at-deploy-time"
+}

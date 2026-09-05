@@ -2,7 +2,8 @@
 
 `mail-suite` 当前已进入控制面业务实现。本仓库提供 Go 控制面进程、React 双端工作区、PostgreSQL
 开发依赖、邮箱开通意图与 operation worker 状态机，以及可显式启用的服务端 OIDC 登录、会话、退出
-和前端路由守卫；真实 mail-core adapter、worker 生产接线、邮箱投递、邮件读取和高可用能力尚未完成。
+和前端路由守卫；真实 Stalwart mail-core adapter 与 worker 生产接线已实现，服务器部署、邮箱投递、
+邮件读取和高可用能力尚未完成。
 
 当前业务契约见
 [邮箱开通意图与 Operation Ledger 需求](docs/requirements/2026-08-31-mailbox-provisioning-intent.md)，
@@ -57,24 +58,35 @@ docker compose -f deploy/compose/compose.yaml down
 ## 启动进程
 
 四个后端入口相互独立。数据库 schema 只能由显式 `migrator` 命令变更。API 必须显式设置认证
-模式；当前不接 IdP 的本地预览使用 `disabled`，worker 不读取该配置：
+模式；当前不接 IdP 的本地预览使用 `disabled`。worker 必须显式配置 `stalwart` mail-core 模式、
+内部 HTTPS endpoint、CA、管理员密码文件和邮箱派生密钥文件，否则启动失败：
 
 ```powershell
 go run ./src/backend/cmd/migrator --up
 go run ./src/backend/cmd/migrator --status
 $env:MAIL_SUITE_AUTH_MODE = "disabled"
 go run ./src/backend/cmd/api
-go run ./src/backend/cmd/worker
 go run ./src/backend/cmd/migrator --check-config
 go run ./src/backend/cmd/identity-bootstrap --version
 corepack pnpm --dir src/web dev
 ```
 
+本地运行真实 worker 时，先启动已验证的 Stalwart 环境，再在独立终端注入连接参数。两个 secret 文件
+必须已存在，内容分别是管理员密码和 32 字节标准 Base64 派生密钥；不要把内容写进命令或仓库：
+
+```powershell
+$env:MAIL_SUITE_MAIL_CORE_MODE = "stalwart"
+$env:MAIL_SUITE_STALWART_ENDPOINT = "https://你的-Stalwart-内部主机名"
+$env:MAIL_SUITE_STALWART_ADMIN_USERNAME = "admin@test.snowye.fun"
+$env:MAIL_SUITE_STALWART_ADMIN_PASSWORD_FILE = "路径\stalwart-admin-password"
+$env:MAIL_SUITE_STALWART_MAILBOX_KEY_FILE = "路径\stalwart-mailbox-key"
+$env:MAIL_SUITE_STALWART_CA_FILE = "路径\ca-bundle.pem"
+$env:MAIL_SUITE_STALWART_TIMEOUT = "10s"
+go run ./src/backend/cmd/worker
+```
+
 `migrator --down` 只回滚最后一个 migration，会删除对应业务表；仅在明确需要回滚且数据已备份时
 手工执行。应用进程不会自动调用该命令。
-
-当前 `cmd/worker` 仍只运行健康探针外壳。邮箱 operation 的 PostgreSQL repository、lease/attempt
-状态机和 runner 已实现并由测试覆盖，但在真实 Stalwart adapter 与运行配置接入前不会处理外部副作用。
 
 默认地址：API 为 `127.0.0.1:8080`，worker 为 `127.0.0.1:8081`，Web 为
 `http://127.0.0.1:5173`。可以通过 `MAIL_SUITE_HTTP_ADDRESS`、
@@ -157,6 +169,8 @@ go build -o .tmp/bin/worker ./src/backend/cmd/worker
 go build -o .tmp/bin/migrator ./src/backend/cmd/migrator
 go build -o .tmp/bin/identity-bootstrap ./src/backend/cmd/identity-bootstrap
 go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+python tests/integration/server/test_alidns_dns_hook.py
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/integration/server/verify-static.ps1
 ```
 
 Web 与契约检查：
@@ -199,6 +213,6 @@ Web 容器监听 `8080`，并通过 `MAIL_SUITE_API_UPSTREAM` 指定同源 `/hea
 ## 单节点测试服务器部署
 
 Ubuntu 24.04 测试主机的固定运行时版本、最小防火墙、资源限制、部署、验证和回滚命令见
-[单节点测试服务器部署](deploy/server/README.md)。当前服务器编排显式使用 `disabled` 认证模式，只提供
-数据库、内部健康服务、本机预览入口，以及不开放公网端口的 PostgreSQL 只读 SSH 隧道；它不包含
-IdP、TLS 或 mail-core，也不表示 SMTP 收件、OIDC 端到端登录或邮件管理能力已经完成。
+[单节点测试服务器部署](deploy/server/README.md)。当前编排已包含 Keycloak、公共 TLS、Stalwart、真实
+worker 和受控测试身份，但在三个 hostname 的 DNS、外部 SMTP/浏览器矩阵和真实邮件业务 API 验收
+完成前，不能认定完整在线测试闭环已经通过。

@@ -1,0 +1,131 @@
+{
+  "realm": "mail-suite-test",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyInitialCounter": 0,
+  "otpPolicyDigits": 6,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyPeriod": 30,
+  "otpPolicyCodeReusable": false,
+  "clients": [
+    {
+      "clientId": "mail-suite-test",
+      "name": "Mail Suite online test",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "clientAuthenticatorType": "client-secret",
+      "secret": "replace-at-deploy-time",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "https://mail.test.snowye.fun/api/v1/auth/callback"
+      ],
+      "webOrigins": [
+        "https://mail.test.snowye.fun"
+      ],
+      "protocolMappers": [
+        {
+          "name": "mail-suite-amr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "replace-at-deploy-time",
+      "username": "mailbox",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "mailbox@test.snowye.fun",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "replace-at-deploy-time",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "replace-at-deploy-time",
+      "username": "administrator",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "administrator@test.snowye.fun",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "replace-at-deploy-time",
+          "temporary": false
+        },
+        {
+          "type": "otp",
+          "userLabel": "Mail Suite online test TOTP",
+          "secretData": "replace-at-deploy-time",
+          "credentialData": "{\"subType\":\"totp\",\"digits\":6,\"counter\":0,\"period\":30,\"algorithm\":\"HmacSHA1\"}"
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "replace-at-deploy-time",
+      "username": "unmapped",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "unmapped@test.snowye.fun",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "replace-at-deploy-time",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "replace-at-deploy-time",
+      "username": "suspended",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "suspended@test.snowye.fun",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "replace-at-deploy-time",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    },
+    {
+      "id": "replace-at-deploy-time",
+      "username": "mfa-insufficient",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "mfa-insufficient@test.snowye.fun",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "replace-at-deploy-time",
+          "temporary": false
+        }
+      ],
+      "requiredActions": []
+    }
+  ]
+}
