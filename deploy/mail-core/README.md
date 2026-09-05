@@ -32,8 +32,8 @@ The harness starts only loopback high ports and validates:
 - JMAP `Email/query`, structured Message-ID/From/To/text/attachment checks, and
   attachment/raw-blob downloads for the delivered fixture;
 - raw-blob SHA-256 stability after restarting Stalwart;
-- account create, disable, enable, delete, and create again without
-  historical-success reuse.
+- account create, inspect, delete, and create again without historical-success
+  reuse.
 
 By default the script removes its project containers, network, and volumes in
 a `finally` block. Pass `-Keep` to retain the isolated environment for manual

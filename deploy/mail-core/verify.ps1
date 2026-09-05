@@ -303,7 +303,7 @@ function Get-StalwartAccountState {
         -Url 'https://stalwart:443' `
         -Username $Username `
         -Password $Password `
-        -Arguments @('--insecure', 'get', 'Account', $AccountId, '--fields', 'id,name,isEnabled', '--json')
+        -Arguments @('--insecure', 'get', 'Account', $AccountId, '--fields', 'id,name', '--json')
     $json = $output | Where-Object {
         ([string]$_).TrimStart().StartsWith('{') -or ([string]$_).TrimStart().StartsWith('[')
     } | Select-Object -First 1
@@ -323,13 +323,11 @@ function Get-StalwartAccountState {
     return $account
 }
 
-# Assert-StalwartAccountState 核对 Admin 观测到的账户名称与启用状态。
+# Assert-StalwartAccountState 核对 Admin 观测到的账户标识与名称。
 function Assert-StalwartAccountState {
     param(
         [Parameter(Mandatory)]
         [string]$AccountId,
-        [Parameter(Mandatory)]
-        [bool]$ExpectedEnabled,
         [Parameter(Mandatory)]
         [string]$Username,
         [Parameter(Mandatory)]
@@ -342,13 +340,6 @@ function Assert-StalwartAccountState {
         -Password $Password
     if ([string]::IsNullOrWhiteSpace([string]$account.name)) {
         throw "Stalwart account get returned an empty name: account=$AccountId"
-    }
-    $enabledProperty = $account.PSObject.Properties['isEnabled']
-    if ($null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool]) {
-        throw "Stalwart account get did not return a boolean isEnabled: account=$AccountId"
-    }
-    if ([bool]$enabledProperty.Value -ne $ExpectedEnabled) {
-        throw "Stalwart account observed state mismatch: account=$AccountId expectedEnabled=$ExpectedEnabled actualEnabled=$($enabledProperty.Value)"
     }
 }
 
@@ -521,7 +512,8 @@ function Invoke-LocalHttpsRequest {
         [string]$Username,
         [Parameter(Mandatory)]
         [string]$Password,
-        [string]$JsonBody
+        [string]$JsonBody,
+        [switch]$AllowJmapDiscoveryRedirect
     )
 
     if (-not $PathAndQuery.StartsWith('/')) {
@@ -551,9 +543,20 @@ function Invoke-LocalHttpsRequest {
         $response = [System.Net.HttpWebResponse]$request.GetResponse()
     } catch [System.Net.WebException] {
         $status = 'transport-error'
+        $location = $null
         if ($null -ne $_.Exception.Response) {
             $status = [int]$_.Exception.Response.StatusCode
+            $location = $_.Exception.Response.Headers['Location']
             $_.Exception.Response.Dispose()
+        }
+        if ($AllowJmapDiscoveryRedirect -and $Method -eq 'GET' -and
+            $PathAndQuery -eq '/.well-known/jmap' -and $status -eq 307 -and
+            $location -eq '/jmap/session') {
+            return ,(Invoke-LocalHttpsRequest `
+                -Method GET `
+                -PathAndQuery '/jmap/session' `
+                -Username $Username `
+                -Password $Password)
         }
         throw "HTTPS request failed: $Method $PathAndQuery status=$status"
     }
@@ -969,7 +972,6 @@ try {
     }
     Assert-StalwartAccountState `
         -AccountId $accountId `
-        -ExpectedEnabled $true `
         -Username $adminUser `
         -Password $adminPassword
 
@@ -988,7 +990,8 @@ try {
         -Method GET `
         -PathAndQuery '/.well-known/jmap' `
         -Username 'receiver@mail-suite.test' `
-        -Password $mailboxPassword
+        -Password $mailboxPassword `
+        -AllowJmapDiscoveryRedirect
     $jmapSession = Convert-JsonResponse -Bytes $sessionBytes
     $accountProperty = $jmapSession.primaryAccounts.PSObject.Properties | Where-Object { $_.Name -eq $mailCapability }
     $jmapAccountId = $accountProperty.Value
@@ -1029,35 +1032,6 @@ try {
         -Url 'https://stalwart:443' `
         -Username $adminUser `
         -Password $adminPassword `
-        -Arguments @('--insecure', 'update', 'Account', $accountId, '--field', 'isEnabled=false')
-    Assert-StalwartAccountState `
-        -AccountId $accountId `
-        -ExpectedEnabled $false `
-        -Username $adminUser `
-        -Password $adminPassword
-    $disabledRcpt = Test-SmtpRecipient -Recipient 'receiver@mail-suite.test'
-    if ($disabledRcpt -notmatch '^5') {
-        throw "Disabled mailbox was still accepted: $disabledRcpt"
-    }
-    $null = Invoke-StalwartCli `
-        -Url 'https://stalwart:443' `
-        -Username $adminUser `
-        -Password $adminPassword `
-        -Arguments @('--insecure', 'update', 'Account', $accountId, '--field', 'isEnabled=true')
-    Assert-StalwartAccountState `
-        -AccountId $accountId `
-        -ExpectedEnabled $true `
-        -Username $adminUser `
-        -Password $adminPassword
-    $enabledRcpt = Test-SmtpRecipient -Recipient 'receiver@mail-suite.test'
-    if ($enabledRcpt -notmatch '^250') {
-        throw "Re-enabled mailbox was not accepted: $enabledRcpt"
-    }
-
-    $null = Invoke-StalwartCli `
-        -Url 'https://stalwart:443' `
-        -Username $adminUser `
-        -Password $adminPassword `
         -Arguments @('--insecure', 'delete', 'Account', '--ids', $accountId)
     $deletedRcpt = Test-SmtpRecipient -Recipient 'receiver@mail-suite.test'
     if ($deletedRcpt -notmatch '^5') {
@@ -1076,7 +1050,6 @@ try {
     }
     Assert-StalwartAccountState `
         -AccountId $recreatedAccountId `
-        -ExpectedEnabled $true `
         -Username $adminUser `
         -Password $adminPassword
     $recreatedRcpt = Test-SmtpRecipient -Recipient 'receiver@mail-suite.test'
@@ -1098,8 +1071,6 @@ try {
         fixtureSha256 = Get-Sha256Hex -Bytes (Get-CanonicalFixtureBytes)
         rawBlobSha256 = $beforeRestart.RawSha256
         normalRestartRawHashStable = $true
-        disabledRecipient = $disabledRcpt
-        enabledRecipient = $enabledRcpt
         deletedRecipient = $deletedRcpt
         recreatedRecipient = $recreatedRcpt
         smtp250CrashDurability = 'pending-fault-verification'
@@ -1109,6 +1080,7 @@ try {
             'read-only-storage',
             'dependency-stop',
             'partial-config',
+            'mailbox-suspend-restore',
             'dual-instance-fault-domain'
         )
         credentialsFile = $(if ($Keep) { $credentialsPath } else { $null })

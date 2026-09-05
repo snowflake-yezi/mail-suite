@@ -40,7 +40,12 @@ Assert-Contains -Text $verifySource -Pattern '\[switch\]\$Reset' -Message 'Expli
 Assert-Contains -Text $verifySource -Pattern 'smtp250CrashDurability\s*=\s*''pending-fault-verification''' -Message 'SMTP 250 durability is overstated'
 Assert-Contains -Text $verifySource -Pattern "'messageId'.*'from'.*'to'.*'textBody'.*'attachments'.*'bodyValues'" -Message 'Structured JMAP properties are incomplete'
 Assert-Contains -Text $verifySource -Pattern 'RawSha256' -Message 'Raw JMAP blob hashing is missing'
-Assert-Contains -Text $verifySource -Pattern "'get', 'Account'.*'id,name,isEnabled'" -Message 'Admin observed-state query is missing'
+Assert-Contains -Text $verifySource -Pattern "'get', 'Account'.*'id,name'" -Message 'Admin observed-state query is missing'
+Assert-Contains -Text $verifySource -Pattern '\.AllowAutoRedirect\s*=\s*\$false' -Message 'Automatic JMAP redirects must remain disabled'
+Assert-Contains -Text $verifySource -Pattern "(?s)PathAndQuery -eq '/\.well-known/jmap'.*status -eq 307.*location -eq '/jmap/session'" -Message 'The fixed JMAP discovery redirect guard is missing'
+if ($verifySource -match 'isEnabled') {
+    throw 'UserAccount must not use the Domain-only isEnabled field'
+}
 Assert-Contains -Text $verifySource -Pattern "'wrong-credential'" -Message 'Wrong-credential acceptance gate is not reported'
 Assert-Contains -Text $verifySource -Pattern "'timeout'" -Message 'Timeout acceptance gate is not reported'
 
