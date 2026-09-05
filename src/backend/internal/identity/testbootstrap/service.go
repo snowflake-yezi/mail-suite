@@ -2,6 +2,8 @@ package testbootstrap
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,6 +27,20 @@ var (
 type Result struct {
 	// Changed 表示本次事务创建或删除了至少一行数据。
 	Changed bool
+}
+
+// provisionFixture 保存活动测试邮箱对应的确定性异步开通事实。
+type provisionFixture struct {
+	// OperationID 是活动测试邮箱唯一且可重复计算的开通任务标识。
+	OperationID uuid.UUID
+	// OutboxID 是该任务唯一且可重复计算的首发事件标识。
+	OutboxID uuid.UUID
+	// IdempotencyKey 防止重复 bootstrap 生成第二条业务任务。
+	IdempotencyKey string
+	// RequestHash 同时作为 operation 的不可变配置摘要。
+	RequestHash [sha256.Size]byte
+	// Payload 是不含地址和凭据的稳定 outbox 资源引用。
+	Payload []byte
 }
 
 // Apply 在一个串行事务内创建或核验测试身份 fixture，发现漂移时不覆盖任何已有数据。
@@ -125,19 +141,23 @@ func prepareTransaction(ctx context.Context, tx pgx.Tx) error {
 	var migrationApplied bool
 	if err := tx.QueryRow(ctx, `
         SELECT EXISTS (
-            SELECT 1 FROM goose_db_version WHERE version_id = 2 AND is_applied
+            SELECT 1 FROM goose_db_version WHERE version_id = 3 AND is_applied
         )
     `).Scan(&migrationApplied); err != nil {
 		return databaseError()
 	}
 	if !migrationApplied {
-		return errors.New("控制面数据库 schema 尚未完成身份 migration")
+		return errors.New("控制面数据库 schema 尚未完成 mailbox operation migration")
 	}
 	return nil
 }
 
 // insertFixture 只插入缺失行并累计变化，冲突行留给后续精确核验判定漂移。
 func insertFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) (bool, error) {
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		return false, databaseError()
+	}
 	changed := false
 	statements := []struct {
 		query string
@@ -177,6 +197,32 @@ func insertFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) (bool, err
 				manifest.Domain.ID,
 				manifest.Suspended.LocalPart,
 				manifest.Suspended.DisplayName,
+			},
+		},
+		{
+			`INSERT INTO operations (
+                id, tenant_id, kind, resource_type, resource_id, status,
+                idempotency_key, request_hash, desired_revision, configuration_hash
+             ) VALUES ($1, $2, 'mailbox.provision', 'mailbox', $3, 'pending', $4, $5, 1, $5)
+             ON CONFLICT DO NOTHING`,
+			[]any{
+				provision.OperationID,
+				manifest.Tenant.ID,
+				manifest.Mailbox.MailboxID,
+				provision.IdempotencyKey,
+				provision.RequestHash[:],
+			},
+		},
+		{
+			`INSERT INTO outbox_events (
+                id, tenant_id, operation_id, event_type, payload, status, attempts
+             ) VALUES ($1, $2, $3, 'mailbox.provision.requested', $4, 'pending', 0)
+             ON CONFLICT DO NOTHING`,
+			[]any{
+				provision.OutboxID,
+				manifest.Tenant.ID,
+				provision.OperationID,
+				provision.Payload,
 			},
 		},
 		{
@@ -270,6 +316,9 @@ func verifyFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) error {
 		return err
 	}
 	if err := verifyMailbox(ctx, tx, manifest, manifest.Suspended); err != nil {
+		return err
+	}
+	if err := verifyProvisionFixture(ctx, tx, manifest); err != nil {
 		return err
 	}
 	if err := verifyPrincipal(
@@ -428,6 +477,61 @@ func verifyMailbox(
 	return nil
 }
 
+// verifyProvisionFixture 核验活动邮箱的 operation/outbox 所有权字段并允许运行状态合法推进。
+func verifyProvisionFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) error {
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		return databaseError()
+	}
+	var operationMatches bool
+	if err = tx.QueryRow(ctx, `
+        SELECT tenant_id = $2
+           AND kind = 'mailbox.provision'
+           AND resource_type = 'mailbox'
+           AND resource_id = $3
+           AND idempotency_key = $4
+           AND request_hash = $5
+           AND desired_revision = 1
+           AND configuration_hash = $5
+           AND status IN ('pending', 'running', 'retry_wait', 'unknown', 'succeeded', 'failed', 'dead', 'superseded')
+        FROM operations
+        WHERE id = $1
+    `,
+		provision.OperationID,
+		manifest.Tenant.ID,
+		manifest.Mailbox.MailboxID,
+		provision.IdempotencyKey,
+		provision.RequestHash[:],
+	).Scan(&operationMatches); err != nil {
+		return rowVerificationError(err, "邮箱开通 operation")
+	}
+	if !operationMatches {
+		return driftError("邮箱开通 operation")
+	}
+
+	var outboxMatches bool
+	if err = tx.QueryRow(ctx, `
+        SELECT tenant_id = $2
+           AND operation_id = $3
+           AND event_type = 'mailbox.provision.requested'
+           AND payload = $4::jsonb
+           AND status IN ('pending', 'processing', 'delivered', 'dead')
+        FROM outbox_events
+        WHERE id = $1
+    `,
+		provision.OutboxID,
+		manifest.Tenant.ID,
+		provision.OperationID,
+		string(provision.Payload),
+	).Scan(&outboxMatches); err != nil {
+		return rowVerificationError(err, "邮箱开通 outbox")
+	}
+	if !outboxMatches {
+		return driftError("邮箱开通 outbox")
+	}
+	return nil
+}
+
 // verifyPrincipal 核验本地主体授权映射的全部稳定字段。
 func verifyPrincipal(
 	ctx context.Context,
@@ -488,8 +592,12 @@ func readPermissions(ctx context.Context, tx pgx.Tx, principalID uuid.UUID) ([]s
 
 // fixtureFootprint 判断任一稳定 ID、自然键或外部身份键是否仍有数据库占位。
 func fixtureFootprint(ctx context.Context, tx pgx.Tx, manifest Manifest) (int, error) {
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		return 0, databaseError()
+	}
 	var count int
-	if err := tx.QueryRow(ctx, `
+	if err = tx.QueryRow(ctx, `
         SELECT
             (SELECT count(*) FROM tenants WHERE id = $1) +
             (SELECT count(*) FROM domains WHERE id = $2 OR name = $3) +
@@ -499,7 +607,11 @@ func fixtureFootprint(ctx context.Context, tx pgx.Tx, manifest Manifest) (int, e
             (SELECT count(*) FROM identity_principals
              WHERE id = ANY($6::uuid[])
                 OR (oidc_issuer = $7 AND oidc_subject = ANY($8::text[]))) +
-            (SELECT count(*) FROM principal_permissions WHERE principal_id = ANY($6::uuid[]))
+            (SELECT count(*) FROM principal_permissions WHERE principal_id = ANY($6::uuid[])) +
+            (SELECT count(*) FROM operations
+             WHERE id = $9 OR (tenant_id = $1 AND idempotency_key = $10)) +
+            (SELECT count(*) FROM outbox_events
+             WHERE id = $11 OR operation_id = $9)
     `,
 		manifest.Tenant.ID,
 		manifest.Domain.ID,
@@ -509,6 +621,9 @@ func fixtureFootprint(ctx context.Context, tx pgx.Tx, manifest Manifest) (int, e
 		principalIDs(manifest),
 		manifest.OIDCIssuer,
 		allSubjects(manifest),
+		provision.OperationID,
+		provision.IdempotencyKey,
+		provision.OutboxID,
 	).Scan(&count); err != nil {
 		return 0, databaseError()
 	}
@@ -517,19 +632,26 @@ func fixtureFootprint(ctx context.Context, tx pgx.Tx, manifest Manifest) (int, e
 
 // ensureRemovalScope 拒绝删除已承载任何 manifest 外业务资源的测试租户。
 func ensureRemovalScope(ctx context.Context, tx pgx.Tx, manifest Manifest) error {
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		return databaseError()
+	}
 	var hasExtraData bool
-	if err := tx.QueryRow(ctx, `
+	if err = tx.QueryRow(ctx, `
         SELECT
             EXISTS (SELECT 1 FROM domains WHERE tenant_id = $1 AND id <> $2)
             OR EXISTS (SELECT 1 FROM mailboxes WHERE tenant_id = $1 AND id <> ALL($3::uuid[]))
             OR EXISTS (SELECT 1 FROM identity_principals WHERE tenant_id = $1 AND id <> ALL($4::uuid[]))
-            OR EXISTS (SELECT 1 FROM operations WHERE tenant_id = $1)
-            OR EXISTS (SELECT 1 FROM outbox_events WHERE tenant_id = $1)
+            OR EXISTS (SELECT 1 FROM operations WHERE tenant_id = $1 AND id <> $5)
+            OR EXISTS (SELECT 1 FROM outbox_events WHERE tenant_id = $1 AND id <> $6)
+            OR EXISTS (SELECT 1 FROM operation_attempts WHERE tenant_id = $1 AND operation_id <> $5)
     `,
 		manifest.Tenant.ID,
 		manifest.Domain.ID,
 		mailboxIDs(manifest),
 		principalIDs(manifest),
+		provision.OperationID,
+		provision.OutboxID,
 	).Scan(&hasExtraData); err != nil {
 		return databaseError()
 	}
@@ -541,6 +663,10 @@ func ensureRemovalScope(ctx context.Context, tx pgx.Tx, manifest Manifest) error
 
 // deleteFixture 按外键逆序删除 fixture 拥有的数据，并核验稳定资源删除数量。
 func deleteFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) error {
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		return databaseError()
+	}
 	principals := principalIDs(manifest)
 	statements := []struct {
 		query        string
@@ -551,6 +677,9 @@ func deleteFixture(ctx context.Context, tx pgx.Tx, manifest Manifest) error {
 		{"DELETE FROM user_sessions WHERE principal_id = ANY($1::uuid[])", []any{principals}, -1},
 		{"DELETE FROM principal_permissions WHERE principal_id = ANY($1::uuid[])", []any{principals}, 2},
 		{"DELETE FROM identity_principals WHERE id = ANY($1::uuid[])", []any{principals}, 4},
+		{"DELETE FROM outbox_events WHERE id = $1", []any{provision.OutboxID}, 1},
+		{"DELETE FROM operation_attempts WHERE operation_id = $1", []any{provision.OperationID}, -1},
+		{"DELETE FROM operations WHERE id = $1", []any{provision.OperationID}, 1},
 		{"DELETE FROM mailboxes WHERE id = ANY($1::uuid[])", []any{mailboxIDs(manifest)}, 2},
 		{"DELETE FROM domains WHERE id = $1", []any{manifest.Domain.ID}, 1},
 		{"DELETE FROM tenants WHERE id = $1", []any{manifest.Tenant.ID}, 1},
@@ -580,6 +709,53 @@ func principalIDs(manifest Manifest) []uuid.UUID {
 // mailboxIDs 返回 manifest 管理的两个测试邮箱标识。
 func mailboxIDs(manifest Manifest) []uuid.UUID {
 	return []uuid.UUID{manifest.Mailbox.MailboxID, manifest.Suspended.MailboxID}
+}
+
+// newProvisionFixture 从活动邮箱稳定身份生成 operation、outbox 和业务配置摘要。
+func newProvisionFixture(manifest Manifest) (provisionFixture, error) {
+	operationID := uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte("mail-suite:test-bootstrap:operation:"+manifest.Mailbox.MailboxID.String()),
+	)
+	outboxID := uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte("mail-suite:test-bootstrap:outbox:"+manifest.Mailbox.MailboxID.String()),
+	)
+	fingerprint, err := json.Marshal(struct {
+		DomainID    string `json:"domain_id"`
+		LocalPart   string `json:"local_part"`
+		DisplayName string `json:"display_name"`
+	}{
+		DomainID:    manifest.Domain.ID.String(),
+		LocalPart:   manifest.Mailbox.LocalPart,
+		DisplayName: manifest.Mailbox.DisplayName,
+	})
+	if err != nil {
+		return provisionFixture{}, err
+	}
+	payload, err := json.Marshal(struct {
+		TenantID    uuid.UUID `json:"tenant_id"`
+		MailboxID   uuid.UUID `json:"mailbox_id"`
+		DomainID    uuid.UUID `json:"domain_id"`
+		OperationID uuid.UUID `json:"operation_id"`
+		Revision    int64     `json:"revision"`
+	}{
+		TenantID:    manifest.Tenant.ID,
+		MailboxID:   manifest.Mailbox.MailboxID,
+		DomainID:    manifest.Domain.ID,
+		OperationID: operationID,
+		Revision:    1,
+	})
+	if err != nil {
+		return provisionFixture{}, err
+	}
+	return provisionFixture{
+		OperationID:    operationID,
+		OutboxID:       outboxID,
+		IdempotencyKey: "test-bootstrap-mailbox:" + manifest.Mailbox.MailboxID.String(),
+		RequestHash:    sha256.Sum256(fingerprint),
+		Payload:        payload,
+	}, nil
 }
 
 // allSubjects 返回五类测试身份的 OIDC subject，用于冲突足迹检查。

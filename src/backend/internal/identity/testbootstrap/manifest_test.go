@@ -22,6 +22,15 @@ func TestLoadManifestAcceptsCompleteTestIdentityMatrix(t *testing.T) {
 	}
 }
 
+// TestManifestValidateAcceptsApprovedOnlineTestDomain 验证部署契约的唯一公网测试域可用于受控身份初始化。
+func TestManifestValidateAcceptsApprovedOnlineTestDomain(t *testing.T) {
+	manifest := validTestManifest()
+	manifest.Domain.Name = "test.snowye.fun"
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("批准在线测试域应通过 manifest 校验：%v", err)
+	}
+}
+
 func TestLoadManifestRejectsUnknownFieldAndTrailingDocument(t *testing.T) {
 	content, err := json.Marshal(validTestManifest())
 	if err != nil {
@@ -53,7 +62,7 @@ func TestManifestValidateRejectsUnsafeOrAmbiguousFixtureValues(t *testing.T) {
 			},
 		},
 		{
-			name: "真实可投递域名",
+			name: "未批准公网域名",
 			mutate: func(manifest *Manifest) {
 				manifest.Domain.Name = "mail.example.com"
 			},

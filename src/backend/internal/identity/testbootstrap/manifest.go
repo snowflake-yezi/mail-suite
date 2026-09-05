@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	manifestSchemaVersion = 1
-	maxManifestBytes      = 64 * 1024
+	manifestSchemaVersion    = 1
+	maxManifestBytes         = 64 * 1024
+	approvedOnlineTestDomain = "test.snowye.fun"
 )
 
 var (
@@ -35,7 +36,7 @@ type Manifest struct {
 	OIDCIssuer string `json:"oidc_issuer"`
 	// Tenant 是 fixture 独占的控制面测试租户。
 	Tenant TenantManifest `json:"tenant"`
-	// Domain 是 fixture 独占且位于 .test 保留顶级域的邮箱域名。
+	// Domain 是 fixture 独占的保留域或批准在线测试邮箱域名。
 	Domain DomainManifest `json:"domain"`
 	// Mailbox 是能够正常登录的 active 邮箱主体。
 	Mailbox MailboxPrincipalManifest `json:"mailbox"`
@@ -57,11 +58,11 @@ type TenantManifest struct {
 	Name string `json:"name"`
 }
 
-// DomainManifest 固定测试邮件域的稳定标识和保留域名。
+// DomainManifest 固定测试邮件域的稳定标识和受控域名。
 type DomainManifest struct {
 	// ID 是测试域名跨重复执行保持不变的 UUID。
 	ID uuid.UUID `json:"id"`
-	// Name 是小写规范化且以 .test 结尾的测试域名。
+	// Name 是小写规范化的保留域或批准在线测试域名。
 	Name string `json:"name"`
 }
 
@@ -130,7 +131,7 @@ func (manifest Manifest) Validate() error {
 		return errors.New("测试身份 manifest 的租户无效")
 	}
 	if manifest.Domain.ID == uuid.Nil || !validTestDomain(manifest.Domain.Name) {
-		return errors.New("测试身份 manifest 的域名必须是小写 .test 保留域")
+		return errors.New("测试身份 manifest 的域名必须是小写 .test 保留域或已批准在线测试域")
 	}
 	if err := validateMailboxPrincipal("mailbox", manifest.Mailbox); err != nil {
 		return err
@@ -218,10 +219,11 @@ func validateAdministratorPrincipal(name string, principal AdministratorPrincipa
 	return nil
 }
 
-// validTestDomain 仅接受不会进入公共 DNS 的保留测试顶级域。
+// validTestDomain 仅接受保留测试顶级域或部署契约精确批准的在线测试域。
 func validTestDomain(domain string) bool {
+	approvedDomain := strings.HasSuffix(domain, ".test") || domain == approvedOnlineTestDomain
 	if domain != strings.ToLower(domain) || domain != strings.TrimSpace(domain) ||
-		len(domain) < len("a.test") || len(domain) > 253 || !strings.HasSuffix(domain, ".test") ||
+		len(domain) < len("a.test") || len(domain) > 253 || !approvedDomain ||
 		strings.HasSuffix(domain, ".") || hasControl(domain) {
 		return false
 	}

@@ -63,17 +63,27 @@ func TestApplyAndRemoveEnforceIdempotenceDriftAndOwnership(t *testing.T) {
 	if changedCount != 1 {
 		t.Fatalf("两个并发初始化只能有一个创建数据：changed=%d", changedCount)
 	}
-	assertFixtureCounts(t, ctx, pool, manifest, 1, 1, 2, 4, 2)
+	assertFixtureCounts(t, ctx, pool, manifest, 1, 1, 2, 4, 2, 1, 1)
 	assertUnmappedSubjectAbsent(t, ctx, pool, manifest)
 
 	replayed, err := Apply(ctx, pool, manifest)
 	if err != nil || replayed.Changed {
 		t.Fatalf("重复初始化必须无变化：result=%+v err=%v", replayed, err)
 	}
+	provision, provisionErr := newProvisionFixture(manifest)
+	if provisionErr != nil {
+		t.Fatalf("生成测试邮箱开通 fixture 失败：%v", provisionErr)
+	}
 	if _, err = pool.Exec(
 		ctx,
-		"UPDATE mailboxes SET observed_status = 'active' WHERE id = $1",
+		`UPDATE mailboxes
+         SET observed_status = 'active',
+             observed_revision = revision,
+             observed_configuration_hash = $2,
+             observed_at = now()
+         WHERE id = $1`,
 		manifest.Mailbox.MailboxID,
+		provision.RequestHash[:],
 	); err != nil {
 		t.Fatalf("推进测试邮箱 observed state 失败：%v", err)
 	}
@@ -129,7 +139,7 @@ func TestApplyAndRemoveEnforceIdempotenceDriftAndOwnership(t *testing.T) {
 	if _, err = Remove(ctx, pool, manifest); !errors.Is(err, ErrUnsafeRemoval) {
 		t.Fatalf("存在额外租户资源时必须拒绝回收：%v", err)
 	}
-	assertFixtureCounts(t, ctx, pool, manifest, 1, 1, 2, 4, 2)
+	assertFixtureCounts(t, ctx, pool, manifest, 1, 1, 2, 4, 2, 1, 1)
 	if _, err = pool.Exec(ctx, "DELETE FROM domains WHERE id = $1", extraDomainID); err != nil {
 		t.Fatalf("清理回收边界外域名失败：%v", err)
 	}
@@ -139,7 +149,7 @@ func TestApplyAndRemoveEnforceIdempotenceDriftAndOwnership(t *testing.T) {
 	if err != nil || !removed.Changed {
 		t.Fatalf("显式回收测试身份 fixture 失败：result=%+v err=%v", removed, err)
 	}
-	assertFixtureCounts(t, ctx, pool, manifest, 0, 0, 0, 0, 0)
+	assertFixtureCounts(t, ctx, pool, manifest, 0, 0, 0, 0, 0, 0, 0)
 	repeatedRemoval, err := Remove(ctx, pool, manifest)
 	if err != nil || repeatedRemoval.Changed {
 		t.Fatalf("重复回收必须无变化：result=%+v err=%v", repeatedRemoval, err)
@@ -222,6 +232,8 @@ func assertFixtureCounts(
 	wantMailboxes int,
 	wantPrincipals int,
 	wantPermissions int,
+	wantOperations int,
+	wantOutboxEvents int,
 ) {
 	t.Helper()
 	var tenants int
@@ -229,23 +241,49 @@ func assertFixtureCounts(
 	var mailboxes int
 	var principals int
 	var permissions int
+	var operations int
+	var outboxEvents int
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		t.Fatalf("生成测试邮箱开通 fixture 失败：%v", err)
+	}
 	if err := pool.QueryRow(ctx, `
         SELECT
             (SELECT count(*) FROM tenants WHERE id = $1),
             (SELECT count(*) FROM domains WHERE id = $2),
             (SELECT count(*) FROM mailboxes WHERE id = ANY($3::uuid[])),
             (SELECT count(*) FROM identity_principals WHERE id = ANY($4::uuid[])),
-            (SELECT count(*) FROM principal_permissions WHERE principal_id = ANY($4::uuid[]))
+            (SELECT count(*) FROM principal_permissions WHERE principal_id = ANY($4::uuid[])),
+            (SELECT count(*) FROM operations WHERE id = $5),
+            (SELECT count(*) FROM outbox_events WHERE id = $6)
     `,
 		manifest.Tenant.ID,
 		manifest.Domain.ID,
 		mailboxIDs(manifest),
 		principalIDs(manifest),
-	).Scan(&tenants, &domains, &mailboxes, &principals, &permissions); err != nil {
+		provision.OperationID,
+		provision.OutboxID,
+	).Scan(
+		&tenants,
+		&domains,
+		&mailboxes,
+		&principals,
+		&permissions,
+		&operations,
+		&outboxEvents,
+	); err != nil {
 		t.Fatalf("统计测试身份 fixture 失败：%v", err)
 	}
-	got := []int{tenants, domains, mailboxes, principals, permissions}
-	want := []int{wantTenants, wantDomains, wantMailboxes, wantPrincipals, wantPermissions}
+	got := []int{tenants, domains, mailboxes, principals, permissions, operations, outboxEvents}
+	want := []int{
+		wantTenants,
+		wantDomains,
+		wantMailboxes,
+		wantPrincipals,
+		wantPermissions,
+		wantOperations,
+		wantOutboxEvents,
+	}
 	for index := range got {
 		if got[index] != want[index] {
 			t.Fatalf("测试身份 fixture 数量错误：got=%v want=%v", got, want)
@@ -327,6 +365,11 @@ func forceDeleteIntegrationFixture(
 ) {
 	t.Helper()
 	principals := principalIDs(manifest)
+	provision, err := newProvisionFixture(manifest)
+	if err != nil {
+		t.Errorf("生成待清理测试邮箱开通 fixture 失败：%v", err)
+		return
+	}
 	for _, statement := range []struct {
 		query string
 		args  []any
@@ -335,6 +378,9 @@ func forceDeleteIntegrationFixture(
 		{"DELETE FROM user_sessions WHERE principal_id = ANY($1::uuid[])", []any{principals}},
 		{"DELETE FROM principal_permissions WHERE principal_id = ANY($1::uuid[])", []any{principals}},
 		{"DELETE FROM identity_principals WHERE id = ANY($1::uuid[])", []any{principals}},
+		{"DELETE FROM outbox_events WHERE operation_id = $1", []any{provision.OperationID}},
+		{"DELETE FROM operation_attempts WHERE operation_id = $1", []any{provision.OperationID}},
+		{"DELETE FROM operations WHERE id = $1", []any{provision.OperationID}},
 		{"DELETE FROM mailboxes WHERE id = ANY($1::uuid[])", []any{mailboxIDs(manifest)}},
 		{"DELETE FROM domains WHERE tenant_id = $1", []any{manifest.Tenant.ID}},
 		{"DELETE FROM tenants WHERE id = $1", []any{manifest.Tenant.ID}},
