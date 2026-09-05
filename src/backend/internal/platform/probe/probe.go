@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -20,6 +21,29 @@ const dependencyUnavailableCode = "DEPENDENCY_UNAVAILABLE"
 type Checker interface {
 	// Check 在上下文截止时间内返回依赖是否可用。
 	Check(context.Context) error
+}
+
+// checkerGroup 按注册顺序检查所有必要依赖，任一失败即撤销就绪。
+type checkerGroup struct {
+	checkers []Checker
+}
+
+// NewCheckerGroup 合并数据库、mail-core 等多个必要就绪条件。
+func NewCheckerGroup(checkers ...Checker) Checker {
+	return &checkerGroup{checkers: append([]Checker(nil), checkers...)}
+}
+
+// Check 共享调用方 deadline 串行检查依赖，并在首个失败处停止。
+func (group *checkerGroup) Check(ctx context.Context) error {
+	for _, checker := range group.checkers {
+		if checker == nil {
+			return errors.New("就绪依赖检查器无效")
+		}
+		if err := checker.Check(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // State 保存探针所需的依赖检查器和进程停止状态。

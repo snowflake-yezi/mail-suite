@@ -23,8 +23,41 @@ import (
 // RouteBuilder 在数据库连接建立后构造当前进程选择启用的业务路由。
 type RouteBuilder func(context.Context, *pgxpool.Pool, *slog.Logger) (probe.RouteRegistrar, error)
 
+// BackgroundBuilder 在共享基础设施建立后装配后台任务和额外就绪条件。
+type BackgroundBuilder func(
+	context.Context,
+	*pgxpool.Pool,
+	*slog.Logger,
+	config.Config,
+) (lifecycle.Runner, probe.Checker, error)
+
 // Run 启动指定服务的健康端点、可选业务路由和 PostgreSQL 就绪检查，直到上下文取消。
 func Run(ctx context.Context, serviceName, defaultHTTPAddress string, builders ...RouteBuilder) error {
+	return run(ctx, serviceName, defaultHTTPAddress, nil, builders...)
+}
+
+// RunWithBackground 启动健康服务与一个必须共同存活的后台任务。
+func RunWithBackground(
+	ctx context.Context,
+	serviceName string,
+	defaultHTTPAddress string,
+	backgroundBuilder BackgroundBuilder,
+	builders ...RouteBuilder,
+) error {
+	if backgroundBuilder == nil {
+		return errors.New("后台任务构造器不能为空")
+	}
+	return run(ctx, serviceName, defaultHTTPAddress, backgroundBuilder, builders...)
+}
+
+// run 统一装配长运行进程的数据库、路由、后台任务、探针和关闭顺序。
+func run(
+	ctx context.Context,
+	serviceName string,
+	defaultHTTPAddress string,
+	backgroundBuilder BackgroundBuilder,
+	builders ...RouteBuilder,
+) error {
 	serviceConfig, err := config.Load(serviceName, defaultHTTPAddress)
 	if err != nil {
 		return err
@@ -47,6 +80,19 @@ func Run(ctx context.Context, serviceName, defaultHTTPAddress string, builders .
 		return err
 	}
 	defer pool.Close()
+	readinessCheckers := []probe.Checker{database.NewChecker(pool)}
+	var background lifecycle.Runner
+	var additionalChecker probe.Checker
+	if backgroundBuilder != nil {
+		background, additionalChecker, err = backgroundBuilder(ctx, pool, logger, serviceConfig)
+		if err != nil {
+			return err
+		}
+		if background == nil || additionalChecker == nil {
+			return errors.New("后台任务装配结果无效")
+		}
+		readinessCheckers = append(readinessCheckers, additionalChecker)
+	}
 	registrars := make([]probe.RouteRegistrar, 0, len(builders))
 	for _, builder := range builders {
 		registrar, buildErr := builder(ctx, pool, logger)
@@ -58,7 +104,7 @@ func Run(ctx context.Context, serviceName, defaultHTTPAddress string, builders .
 		}
 	}
 
-	probeState := probe.NewState(database.NewChecker(pool), serviceConfig.ProbeTimeout)
+	probeState := probe.NewState(probe.NewCheckerGroup(readinessCheckers...), serviceConfig.ProbeTimeout)
 	server := &http.Server{
 		Addr:              serviceConfig.HTTPAddress,
 		Handler:           probe.NewHandler(probeState, logger, registrars...),
@@ -72,12 +118,17 @@ func Run(ctx context.Context, serviceName, defaultHTTPAddress string, builders .
 	}
 	logger.InfoContext(ctx, "服务开始监听", "address", listener.Addr().String())
 
+	runners := make([]lifecycle.Runner, 0, 1)
+	if background != nil {
+		runners = append(runners, background)
+	}
 	err = lifecycle.Serve(
 		ctx,
 		listener,
 		server,
 		probeState.BeginShutdown,
 		serviceConfig.ShutdownTimeout,
+		runners...,
 	)
 	if err == nil {
 		logger.Info("服务已正常停止")

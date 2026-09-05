@@ -7,12 +7,20 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/identity/bootstrap"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/platform/service"
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--healthcheck" {
+		if err := service.CheckConfiguredHealth("127.0.0.1:8080", 2*time.Second); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := service.Run(ctx, "api", "127.0.0.1:8080", bootstrap.Routes); err != nil {

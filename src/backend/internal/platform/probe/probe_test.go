@@ -20,6 +20,33 @@ func (check checkerFunc) Check(ctx context.Context) error {
 	return check(ctx)
 }
 
+func TestCheckerGroupRequiresEveryDependencyAndStopsAtFirstFailure(t *testing.T) {
+	expected := errors.New("mail-core unavailable")
+	calls := make([]string, 0, 3)
+	group := NewCheckerGroup(
+		checkerFunc(func(context.Context) error {
+			calls = append(calls, "database")
+			return nil
+		}),
+		checkerFunc(func(context.Context) error {
+			calls = append(calls, "mail-core")
+			return expected
+		}),
+		checkerFunc(func(context.Context) error {
+			calls = append(calls, "unexpected")
+			return nil
+		}),
+	)
+
+	err := group.Check(context.Background())
+	if !errors.Is(err, expected) {
+		t.Fatalf("组合依赖没有返回首个失败：%v", err)
+	}
+	if strings.Join(calls, ",") != "database,mail-core" {
+		t.Fatalf("组合依赖检查顺序不正确：%v", calls)
+	}
+}
+
 func TestLiveDoesNotDependOnDatabase(t *testing.T) {
 	state := NewState(checkerFunc(func(context.Context) error {
 		return errors.New("database unavailable")
