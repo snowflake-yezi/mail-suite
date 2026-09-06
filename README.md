@@ -173,6 +173,9 @@ python tests/integration/server/test_alidns_dns_hook.py
 powershell -NoProfile -ExecutionPolicy Bypass -File tests/integration/server/verify-static.ps1
 ```
 
+在 Linux 或 Git Bash 中还需运行 `bash tests/integration/server/verify-shell-syntax.sh`，
+该检查与服务器静态契约、AliDNS 单测一起由 CI 执行。
+
 Web 与契约检查：
 
 ```powershell

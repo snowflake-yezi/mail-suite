@@ -14,6 +14,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  server-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check server Bash syntax
+        run: bash tests/integration/server/verify-shell-syntax.sh
+      - name: Test AliDNS hooks
+        run: python3 -B tests/integration/server/test_alidns_dns_hook.py
+      - name: Check server deployment contract
+        shell: pwsh
+        run: ./tests/integration/server/verify-static.ps1
+
   backend:
     runs-on: ubuntu-latest
     env:

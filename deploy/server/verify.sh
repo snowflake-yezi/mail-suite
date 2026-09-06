@@ -441,8 +441,7 @@ verify_certificate_renewal() {
       exit 1
     fi
   done
-  if [[ "$(stat -c '%a:%U:%G' /etc/letsencrypt/renewal-hooks/deploy/mail-suite 2>/dev/null || true)" !=
-        "755:root:root" ]] ||
+  if [[ "$(stat -c '%a:%U:%G' /etc/letsencrypt/renewal-hooks/deploy/mail-suite 2>/dev/null || true)" != "755:root:root" ]] ||
     ! cmp -s "${release_dir}/deploy/server/certbot-deploy-hook.sh" \
       /etc/letsencrypt/renewal-hooks/deploy/mail-suite; then
     echo "Certbot deploy hook 与当前 release 不一致" >&2
