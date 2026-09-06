@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+$gitAttributesPath = Join-Path $repositoryRoot '.gitattributes'
 $composePath = Join-Path $repositoryRoot 'deploy\server\compose.yaml'
 $nginxPath = Join-Path $repositoryRoot 'deploy\server\nginx-public.conf.template'
 $deployPath = Join-Path $repositoryRoot 'deploy\server\deploy.sh'
@@ -32,6 +33,7 @@ function Assert-Contains {
     }
 }
 
+$gitAttributes = Get-Content -Raw -LiteralPath $gitAttributesPath
 $compose = Get-Content -Raw -LiteralPath $composePath
 $nginx = Get-Content -Raw -LiteralPath $nginxPath
 $deploy = Get-Content -Raw -LiteralPath $deployPath
@@ -44,6 +46,8 @@ $installCertificates = Get-Content -Raw -LiteralPath $installCertificatesPath
 $bootstrapStalwart = Get-Content -Raw -LiteralPath $bootstrapStalwartPath
 $verify = Get-Content -Raw -LiteralPath $verifyPath
 
+# Linux 发布归档必须覆盖开发机的全局 autocrlf 设置，避免脚本在目标机解析失败。
+Assert-Contains -Text $gitAttributes -Pattern '(?m)^\* text=auto eol=lf$' -Message 'Git text files must be normalized to LF for Linux release archives'
 Assert-Contains -Text $compose -Pattern '(?m)^\s{2}backend:\r?\n\s{4}internal: true$' -Message 'Compose backend network must remain internal'
 Assert-Contains -Text $compose -Pattern '(?m)^\s+- "25:25"$' -Message 'Stalwart SMTP port is not published'
 Assert-Contains -Text $compose -Pattern '(?m)^\s+- "80:8080"$' -Message 'Web HTTP port is not published'
@@ -154,6 +158,7 @@ if ($aliDnsPolicy.Statement.Count -ne 1 -or
     healthchecks = 'five-compose-plus-stalwart-image'
     certificates = 'three-distinct-lineages'
     certificateRenewal = 'alidns-automated'
+    releaseLineEndings = 'lf'
     manualDnsFallback = 'three-resolver-stable'
     recoveryCredential = 'one-time'
     temporaryCredentials = 'cleanup-trapped'
