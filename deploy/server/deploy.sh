@@ -26,6 +26,7 @@ require_root_and_files() {
     "${release_dir}/deploy/server/configure-alidns-certificate-renewal.sh" \
     "${release_dir}/deploy/server/configure-readonly-database.sh" \
     "${release_dir}/deploy/server/configure-keycloak-database.sh" \
+    "${release_dir}/deploy/server/configure-keycloak-amr.sh" \
     "${release_dir}/deploy/server/bootstrap-stalwart.sh" \
     "${release_dir}/deploy/server/verify.sh" \
     "${release_dir}/deploy/server/config/keycloak-realm.template.json" \
@@ -215,6 +216,7 @@ deploy_release() {
 
   compose up -d keycloak web
   verify_internal_oidc_discovery
+  bash "${release_dir}/deploy/server/configure-keycloak-amr.sh" "${release_dir}" --apply
   compose --profile tools run --rm identity-bootstrap --check --manifest /run/test-identity.json
   compose --profile tools run --rm identity-bootstrap --apply --manifest /run/test-identity.json
   compose up -d --wait postgres keycloak stalwart web api worker

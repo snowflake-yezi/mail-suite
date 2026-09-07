@@ -119,6 +119,15 @@ Web 健康检查也通过 backend 别名访问 `https://mail.test.snowye.fun/hea
 身份 fixture 会为活动测试邮箱创建唯一的 `mailbox.provision` operation/outbox；部署会等待 worker 通过
 Stalwart adapter 将其推进到 `succeeded`。停用身份不创建 mail-core 账号，不能用容器 healthy 代替该
 业务收敛证据。
+Keycloak 就绪后，部署会通过 Admin REST 为 browser flow 的唯一 OTP execution 幂等维护
+`mail-suite-browser-otp-amr`，并用 Keycloak 数据库只读事务核对 `otp` 与 `36000` 秒有效期；未知 alias、
+多个 OTP execution 或 SSO 生命周期漂移都会在 API 启动和 `current` 切换前停止发布。可独立复核：
+
+```bash
+bash /opt/mail-suite/current/deploy/server/configure-keycloak-amr.sh \
+  /opt/mail-suite/current --check
+```
+
 目标 2 GB ECS 上 Keycloak 首次增强、建表和 realm 导入约需 4 分钟；容器健康检查读取管理端真实
 `/health/ready`，不会把端口已监听但仍返回 `503` 的初始化阶段误判为可用。
 
@@ -166,6 +175,13 @@ bash /opt/mail-suite/current/deploy/server/install-public-certificates.sh \
 
 回滚会再次校验 hostname、有效期、证书与私钥配对及三条私钥互异，然后热加载运行服务。不得直接
 编辑 `/opt/mail-suite/shared/tls/current` 或删除归档。
+
+仅回滚 OTP AMR 配置时，脚本会先确认当前 alias 与两个固定值未漂移，再执行精确删除：
+
+```bash
+bash /opt/mail-suite/current/deploy/server/configure-keycloak-amr.sh \
+  /opt/mail-suite/current --rollback
+```
 
 ## PostgreSQL 只读隧道
 

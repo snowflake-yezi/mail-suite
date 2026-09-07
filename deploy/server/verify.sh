@@ -524,6 +524,7 @@ verify_public_firewall() {
 compose ps
 compose --profile tools run --rm migrator --status
 compose --profile tools run --rm identity-bootstrap --check --manifest /run/test-identity.json
+bash "${release_dir}/deploy/server/configure-keycloak-amr.sh" "${release_dir}" --check
 verify_secret_boundaries
 verify_container_constraints
 verify_published_ports

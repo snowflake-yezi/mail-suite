@@ -15,6 +15,7 @@ $aliDnsHookPath = Join-Path $repositoryRoot 'deploy\server\alidns-dns-hook.py'
 $configureRenewalPath = Join-Path $repositoryRoot 'deploy\server\configure-alidns-certificate-renewal.sh'
 $installCertificatesPath = Join-Path $repositoryRoot 'deploy\server\install-public-certificates.sh'
 $bootstrapStalwartPath = Join-Path $repositoryRoot 'deploy\server\bootstrap-stalwart.sh'
+$configureKeycloakAmrPath = Join-Path $repositoryRoot 'deploy\server\configure-keycloak-amr.sh'
 $verifyPath = Join-Path $repositoryRoot 'deploy\server\verify.sh'
 
 # Assert-Contains 要求服务器制品保留指定的安全或运行契约。
@@ -44,6 +45,7 @@ $aliDnsHook = Get-Content -Raw -LiteralPath $aliDnsHookPath
 $configureRenewal = Get-Content -Raw -LiteralPath $configureRenewalPath
 $installCertificates = Get-Content -Raw -LiteralPath $installCertificatesPath
 $bootstrapStalwart = Get-Content -Raw -LiteralPath $bootstrapStalwartPath
+$configureKeycloakAmr = Get-Content -Raw -LiteralPath $configureKeycloakAmrPath
 $verify = Get-Content -Raw -LiteralPath $verifyPath
 
 # Linux 发布归档必须覆盖开发机的全局 autocrlf 设置，避免脚本在目标机解析失败。
@@ -80,6 +82,16 @@ if ([regex]::Matches($nginx, '(?m)^\s*listen 443 ssl(?: default_server)?;$').Cou
 Assert-Contains -Text $deploy -Pattern 'compose exec -T web wget -q -O /dev/null.*\\\s*\r?\n\s*"https://idp\.test\.snowye\.fun/realms/mail-suite-test/\.well-known/openid-configuration"' -Message 'Pre-API internal OIDC discovery probe is missing'
 Assert-Contains -Text $deploy -Pattern 'wait_test_mailbox_operation' -Message 'Deployment does not wait for the active test mailbox operation'
 Assert-Contains -Text $deploy -Pattern "operations\.status IN \('failed', 'dead', 'superseded'\)" -Message 'Mailbox wait does not stop on terminal operation failure'
+Assert-Contains -Text $deploy -Pattern 'configure-keycloak-amr\.sh.*--apply' -Message 'Deployment does not reconcile Keycloak OTP AMR before API startup'
+Assert-Contains -Text $verify -Pattern 'configure-keycloak-amr\.sh.*--check' -Message 'Host verification does not check Keycloak OTP AMR'
+Assert-Contains -Text $configureKeycloakAmr -Pattern 'default\.reference\.value' -Message 'OTP AMR reference value is missing'
+Assert-Contains -Text $configureKeycloakAmr -Pattern 'reference_max_age="36000"' -Message 'OTP AMR maxAge does not match the SSO maximum lifespan'
+Assert-Contains -Text $configureKeycloakAmr -Pattern 'KC_CLI_PASSWORD="\$\{KC_BOOTSTRAP_ADMIN_PASSWORD\}"' -Message 'Keycloak administrator password is not derived inside the existing container environment'
+Assert-Contains -Text $configureKeycloakAmr -Pattern 'BEGIN TRANSACTION READ ONLY;' -Message 'Exact Keycloak authenticator config verification is not read-only'
+Assert-Contains -Text $configureKeycloakAmr -Pattern 'authenticator_config_entry' -Message 'Exact Keycloak authenticator config values are not verified'
+if ($configureKeycloakAmr -match '--password') {
+    throw 'Keycloak administrator password must not be passed in command arguments'
+}
 
 foreach ($hostname in @('mail.test.snowye.fun', 'idp.test.snowye.fun', 'mx1.test.snowye.fun')) {
     Assert-Contains -Text $prepareCertificates -Pattern ([regex]::Escape('"' + $hostname + '"')) -Message "ACME hostname is missing: $hostname"
