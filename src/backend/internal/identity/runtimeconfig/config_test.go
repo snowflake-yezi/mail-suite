@@ -34,6 +34,9 @@ func TestLoadAcceptsCompleteOIDCConfiguration(t *testing.T) {
 	if config.Mode != ModeOIDC || config.ProviderTimeout != 3*time.Second {
 		t.Fatalf("OIDC 模式或超时读取错误：%+v", config)
 	}
+	if config.PostLogoutRedirectURI != "https://mail.example.test/" {
+		t.Fatalf("OIDC 前台退出回跳读取错误：%q", config.PostLogoutRedirectURI)
+	}
 	if strings.Join(config.Scopes, ",") != "openid,profile" {
 		t.Fatalf("OIDC scope 应去重并保序：%v", config.Scopes)
 	}
@@ -50,6 +53,30 @@ func TestLoadRejectsInsecureOrCrossOriginOIDCURLs(t *testing.T) {
 	t.Setenv("MAIL_SUITE_OIDC_REDIRECT_URI", "https://other.example.test/api/v1/auth/callback")
 	if _, err := Load(); err == nil {
 		t.Fatal("跨 origin callback 不得进入 OIDC 模式")
+	}
+}
+
+func TestLoadRejectsInvalidPostLogoutRedirectURI(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "missing", value: ""},
+		{name: "http", value: "http://mail.example.test/"},
+		{name: "cross origin", value: "https://other.example.test/"},
+		{name: "non root", value: "https://mail.example.test/logout"},
+		{name: "query", value: "https://mail.example.test/?next=/mail"},
+		{name: "fragment", value: "https://mail.example.test/#logout"},
+		{name: "userinfo", value: "https://user@mail.example.test/"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setValidOIDCEnvironment(t)
+			t.Setenv("MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI", test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("非法 post-logout URI 必须拒绝：%q", test.value)
+			}
+		})
 	}
 }
 
@@ -71,6 +98,7 @@ func setValidOIDCEnvironment(t *testing.T) {
 	t.Setenv("MAIL_SUITE_OIDC_CLIENT_ID", "mail-suite-test")
 	t.Setenv("MAIL_SUITE_OIDC_CLIENT_SECRET", "test-client-secret")
 	t.Setenv("MAIL_SUITE_OIDC_REDIRECT_URI", "https://mail.example.test/api/v1/auth/callback")
+	t.Setenv("MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI", "https://mail.example.test/")
 	t.Setenv("MAIL_SUITE_AUTH_TRUSTED_ORIGIN", "https://mail.example.test")
 	t.Setenv("MAIL_SUITE_OIDC_SCOPES", "openid profile email")
 	t.Setenv("MAIL_SUITE_OIDC_SIGNING_ALGORITHMS", "RS256")

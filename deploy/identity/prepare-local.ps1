@@ -249,6 +249,9 @@ $realm = [ordered]@{
             serviceAccountsEnabled = $false
             redirectUris = @("https://mail.127-0-0-1.sslip.io:18444/api/v1/auth/callback")
             webOrigins = @("https://mail.127-0-0-1.sslip.io:18444")
+            attributes = [ordered]@{
+                "post.logout.redirect.uris" = "https://mail.127-0-0-1.sslip.io:18444/"
+            }
             protocolMappers = @(
                 [ordered]@{
                     name = "mail-suite-amr"

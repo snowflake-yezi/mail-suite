@@ -151,7 +151,7 @@ test("keeps the authenticated administrator separate from mailbox", async ({
   await expectNoHorizontalOverflow(page);
 });
 
-test("clears the browser shell after a CSRF protected logout", async ({
+test("navigates to the provider after a CSRF protected local logout", async ({
   page,
 }) => {
   await useSession(page, mailboxSession);
@@ -160,15 +160,33 @@ test("clears the browser shell after a CSRF protected logout", async ({
     expect(route.request().headers()["x-csrf-token"]).toBe(
       mailboxSession.csrf_token,
     );
-    await route.fulfill({ status: 204, body: "" });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        logged_out: true,
+        provider_logout_url:
+          "https://idp.example.test/logout?client_id=mail-suite-test",
+      }),
+    });
+  });
+  await page.route("https://idp.example.test/logout?**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: '<!doctype html><html><head><meta charset="utf-8"></head><body><h1>退出身份服务</h1></body></html>',
+    });
   });
   await page.goto("/mail/inbox");
 
   await page.getByRole("button", { name: "退出登录" }).click();
 
-  await expect(page).toHaveURL(/\/login\?return_to=%2Fmail%2Finbox$/);
-  await expect(page.getByRole("heading", { name: "账号登录" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "收件箱" })).toHaveCount(0);
+  await expect(page).toHaveURL(
+    "https://idp.example.test/logout?client_id=mail-suite-test",
+  );
+  await expect(
+    page.getByRole("heading", { name: "退出身份服务" }),
+  ).toBeVisible();
 });
 
 test("uses one persisted theme across authenticated product shells", async ({

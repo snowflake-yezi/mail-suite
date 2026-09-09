@@ -140,6 +140,7 @@ $mfaInsufficientOTP = @($mfaInsufficient[0].credentials | Where-Object { $_.type
 if ($client.Count -ne 1 -or
     @($client[0].redirectUris).Count -ne 1 -or
     $client[0].redirectUris -ne "https://mail.127-0-0-1.sslip.io:18444/api/v1/auth/callback" -or
+    $client[0].attributes."post.logout.redirect.uris" -ne "https://mail.127-0-0-1.sslip.io:18444/" -or
     $amrMapper.Count -ne 1 -or
     $staticMfaMapper.Count -ne 0 -or
     $administratorOTP.Count -ne 1 -or
@@ -198,7 +199,10 @@ $webVolumeTargets = @($composeConfiguration.services.web.volumes | ForEach-Objec
 $keycloakAliases = @($composeConfiguration.services.keycloak.networks."identity-backend".aliases)
 $issuerURI = [Uri]$composeConfiguration.services.api.environment.MAIL_SUITE_OIDC_ISSUER
 $webOriginURI = [Uri]$composeConfiguration.services.api.environment.MAIL_SUITE_AUTH_TRUSTED_ORIGIN
+$postLogoutURI = [Uri]$composeConfiguration.services.api.environment.MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI
 if ($issuerURI.Host -eq $webOriginURI.Host -or
+    $postLogoutURI.AbsoluteUri -ne "https://mail.127-0-0-1.sslip.io:18444/" -or
+    $postLogoutURI.GetLeftPart([UriPartial]::Authority) -ne $webOriginURI.AbsoluteUri.TrimEnd('/') -or
     $apiVolumeTargets.Count -ne 1 -or
     $apiVolumeTargets[0] -ne "/run/identity-idp-trust" -or
     "/run/identity-keycloak-tls" -notin $keycloakVolumeTargets -or
@@ -223,8 +227,9 @@ finally {
 
 if ($Running) {
     $discovery = Invoke-PinnedTLSGet -URI "https://idp.127-0-0-1.sslip.io:18443/realms/mail-suite-local/.well-known/openid-configuration" -CertificatePath $keycloakCertificatePath | ConvertFrom-Json
-    if ($discovery.issuer -ne $manifest.oidc_issuer) {
-        throw "Keycloak discovery issuer 与受控 manifest 不一致"
+    if ($discovery.issuer -ne $manifest.oidc_issuer -or
+        $discovery.end_session_endpoint -ne "https://idp.127-0-0-1.sslip.io:18443/realms/mail-suite-local/protocol/openid-connect/logout") {
+        throw "Keycloak discovery issuer 或 end-session endpoint 与受控配置不一致"
     }
     $session = Invoke-PinnedTLSGet -URI "https://mail.127-0-0-1.sslip.io:18444/api/v1/session" -CertificatePath $webCertificatePath | ConvertFrom-Json
     if ($session.authenticated -ne $false) {

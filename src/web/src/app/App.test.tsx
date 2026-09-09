@@ -4,6 +4,13 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { sessionQueryKey } from '../features/auth/session'
+
+const navigateToProviderLogout = vi.hoisted(() => vi.fn())
+
+vi.mock('../features/auth/providerLogoutNavigation', () => ({
+  navigateToProviderLogout,
+}))
+
 import { App } from './App'
 import { ThemeProvider } from './theme/ThemeProvider'
 
@@ -61,12 +68,18 @@ function mockApplicationFetch(options?: {
   sessionStatus?: number
   health?: 'ok' | 'unavailable'
   logoutStatus?: number
+  logoutPayload?: unknown
 }) {
   const {
     session = { authenticated: false },
     sessionStatus = 200,
     health = 'ok',
-    logoutStatus = 204,
+    logoutStatus = 200,
+    logoutPayload = {
+      logged_out: true,
+      provider_logout_url:
+        'https://idp.example.test/logout?client_id=mail-suite-test',
+    },
   } = options ?? {}
   return vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
     const path = requestPath(input)
@@ -74,7 +87,11 @@ function mockApplicationFetch(options?: {
       return Promise.resolve(jsonResponse(session, sessionStatus))
     }
     if (path.includes('/api/v1/auth/logout')) {
-      return Promise.resolve(new Response(null, { status: logoutStatus }))
+      return Promise.resolve(
+        logoutStatus === 200
+          ? jsonResponse(logoutPayload, logoutStatus)
+          : new Response(null, { status: logoutStatus }),
+      )
     }
     if (path.includes('/health/ready')) {
       return Promise.resolve(
@@ -111,6 +128,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   window.localStorage.clear()
   delete document.documentElement.dataset.theme
+  navigateToProviderLogout.mockReset()
 })
 
 describe('浏览器会话入口', () => {
@@ -320,8 +338,13 @@ describe('退出与会话失效', () => {
     const { queryClient } = renderApp('/mail/inbox')
     queryClient.setQueryData(['sensitive-mail'], { subject: 'private' })
 
+    const cancelQueries = vi.spyOn(queryClient, 'cancelQueries')
+    const removeQueries = vi.spyOn(queryClient, 'removeQueries')
+    const setQueryData = vi.spyOn(queryClient, 'setQueryData')
+
     fireEvent.click(await screen.findByRole('button', { name: '退出登录' }))
 
+    await waitFor(() => expect(navigateToProviderLogout).toHaveBeenCalledOnce())
     expect(
       await screen.findByRole('heading', { name: '账号登录' }),
     ).toBeInTheDocument()
@@ -336,6 +359,18 @@ describe('退出与会话失效', () => {
         }),
       }),
     )
+    expect(navigateToProviderLogout).toHaveBeenCalledWith(
+      'https://idp.example.test/logout?client_id=mail-suite-test',
+    )
+    expect(cancelQueries.mock.invocationCallOrder[0]).toBeLessThan(
+      removeQueries.mock.invocationCallOrder[0],
+    )
+    expect(removeQueries.mock.invocationCallOrder[0]).toBeLessThan(
+      setQueryData.mock.invocationCallOrder[0],
+    )
+    expect(setQueryData.mock.invocationCallOrder[0]).toBeLessThan(
+      navigateToProviderLogout.mock.invocationCallOrder[0],
+    )
   })
 
   it('keeps the current session visible when logout fails', async () => {
@@ -346,6 +381,7 @@ describe('退出与会话失效', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('退出失败')
     expect(screen.getByRole('heading', { name: '收件箱' })).toBeInTheDocument()
+    expect(navigateToProviderLogout).not.toHaveBeenCalled()
   })
 
   it('clears sensitive caches when a refreshed session expires', async () => {

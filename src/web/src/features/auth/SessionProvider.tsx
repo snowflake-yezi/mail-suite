@@ -11,6 +11,7 @@ import {
   sessionQueryKey,
   type SessionContextValue,
 } from './session'
+import { navigateToProviderLogout } from './providerLogoutNavigation'
 
 // sessionIdentityKey 生成决定业务缓存归属的稳定会话身份键。
 function sessionIdentityKey(
@@ -85,7 +86,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!session?.authenticated) {
         return
       }
-      await logoutCurrentSession(session.csrfToken)
+      const { providerLogoutUrl } = await logoutCurrentSession(
+        session.csrfToken,
+      )
       await queryClient.cancelQueries()
       queryClient.removeQueries({
         predicate: (query) => query.queryKey[0] !== sessionQueryKey[0],
@@ -93,6 +96,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       queryClient.setQueryData<CurrentSession>(sessionQueryKey, {
         authenticated: false,
       })
+      navigateToProviderLogout(providerLogoutUrl)
     },
   }
 

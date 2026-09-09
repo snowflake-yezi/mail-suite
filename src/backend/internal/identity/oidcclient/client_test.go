@@ -24,13 +24,14 @@ import (
 
 // testProvider 保存本地 TLS OIDC provider 的签名材料和可控响应。
 type testProvider struct {
-	server       *httptest.Server
-	privateKey   *rsa.PrivateKey
-	claims       map[string]any
-	tokenStatus  int
-	tokenDelay   time.Duration
-	mutex        sync.Mutex
-	lastVerifier string
+	server             *httptest.Server
+	privateKey         *rsa.PrivateKey
+	claims             map[string]any
+	endSessionEndpoint string
+	tokenStatus        int
+	tokenDelay         time.Duration
+	mutex              sync.Mutex
+	lastVerifier       string
 }
 
 func TestClientPerformsDiscoveryAuthorizationAndVerifiedExchange(t *testing.T) {
@@ -61,6 +62,59 @@ func TestClientPerformsDiscoveryAuthorizationAndVerifiedExchange(t *testing.T) {
 	}
 	if provider.observedVerifier() != oidcTestVerifier {
 		t.Fatal("token endpoint 未收到原始 PKCE verifier")
+	}
+	logoutURL, err := url.Parse(client.ProviderLogoutURL())
+	if err != nil || logoutURL.Path != "/logout" || logoutURL.Query().Get("client_id") != "mail-suite-test" ||
+		logoutURL.Query().Get("post_logout_redirect_uri") != "https://mail.example.test/" || len(logoutURL.Query()) != 2 {
+		t.Fatalf("provider 前台退出 URL 构造错误：%q err=%v", client.ProviderLogoutURL(), err)
+	}
+}
+
+func TestBuildProviderLogoutURLRejectsUnsafeRedirect(t *testing.T) {
+	for _, redirect := range []string{
+		"",
+		"http://mail.example.test/",
+		"https://user@mail.example.test/",
+		"https://mail.example.test/path",
+		"https://mail.example.test/?next=/mail",
+		"https://mail.example.test/#fragment",
+	} {
+		if _, err := buildProviderLogoutURL("https://idp.example.test/logout", "client", redirect); err == nil {
+			t.Fatalf("OIDC adapter 必须拒绝不安全回跳：%q", redirect)
+		}
+	}
+}
+
+func TestClientRejectsUnsafeEndSessionEndpoint(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint func(*testProvider) string
+	}{
+		{name: "missing", endpoint: func(*testProvider) string { return "" }},
+		{name: "http", endpoint: func(*testProvider) string { return "http://idp.example.test/logout" }},
+		{name: "userinfo", endpoint: func(*testProvider) string { return "https://user@idp.example.test/logout" }},
+		{name: "query", endpoint: func(provider *testProvider) string { return provider.server.URL + "/logout?fixed=value" }},
+		{name: "fragment", endpoint: func(provider *testProvider) string { return provider.server.URL + "/logout#fragment" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := newTestProvider(t)
+			provider.endSessionEndpoint = test.endpoint(provider)
+			_, err := newWithHTTPClient(context.Background(), runtimeconfig.Config{
+				Mode:                  runtimeconfig.ModeOIDC,
+				Issuer:                provider.server.URL,
+				ClientID:              "mail-suite-test",
+				ClientSecret:          "test-client-secret",
+				RedirectURI:           "https://mail.example.test/api/v1/auth/callback",
+				PostLogoutRedirectURI: "https://mail.example.test/",
+				Scopes:                []string{"openid", "profile"},
+				SigningAlgorithms:     []string{"RS256"},
+				ProviderTimeout:       2 * time.Second,
+			}, provider.server.Client())
+			if err == nil {
+				t.Fatalf("不安全 end-session endpoint 必须拒绝：%q", provider.endSessionEndpoint)
+			}
+		})
 	}
 }
 
@@ -155,6 +209,7 @@ func newTestProvider(t *testing.T) *testProvider {
 				"authorization_endpoint":                provider.server.URL + "/authorize",
 				"token_endpoint":                        provider.server.URL + "/token",
 				"jwks_uri":                              provider.server.URL + "/jwks",
+				"end_session_endpoint":                  provider.endSessionEndpoint,
 				"response_types_supported":              []string{"code"},
 				"subject_types_supported":               []string{"public"},
 				"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -199,6 +254,7 @@ func newTestProvider(t *testing.T) *testProvider {
 		}
 	}))
 	t.Cleanup(provider.server.Close)
+	provider.endSessionEndpoint = provider.server.URL + "/logout"
 	now := time.Now().UTC()
 	provider.claims = map[string]any{
 		"iss":   provider.server.URL,
@@ -246,14 +302,15 @@ func (provider *testProvider) signedIDToken(t *testing.T) string {
 func newTestClient(t *testing.T, provider *testProvider, timeout time.Duration) *Client {
 	t.Helper()
 	client, err := newWithHTTPClient(context.Background(), runtimeconfig.Config{
-		Mode:              runtimeconfig.ModeOIDC,
-		Issuer:            provider.server.URL,
-		ClientID:          "mail-suite-test",
-		ClientSecret:      "test-client-secret",
-		RedirectURI:       "https://mail.example.test/api/v1/auth/callback",
-		Scopes:            []string{"openid", "profile"},
-		SigningAlgorithms: []string{"RS256"},
-		ProviderTimeout:   timeout,
+		Mode:                  runtimeconfig.ModeOIDC,
+		Issuer:                provider.server.URL,
+		ClientID:              "mail-suite-test",
+		ClientSecret:          "test-client-secret",
+		RedirectURI:           "https://mail.example.test/api/v1/auth/callback",
+		PostLogoutRedirectURI: "https://mail.example.test/",
+		Scopes:                []string{"openid", "profile"},
+		SigningAlgorithms:     []string{"RS256"},
+		ProviderTimeout:       timeout,
 	}, provider.server.Client())
 	if err != nil {
 		t.Fatalf("创建测试 OIDC client 失败：%v", err)

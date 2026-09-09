@@ -110,8 +110,8 @@ bash deploy/server/deploy.sh .
 manifest 和 worker 专用 `0400` secret。Stalwart recovery 身份只用于首次 Bootstrap，永久管理员创建
 后会从 `runtime.env` 删除并通过重建容器清除。脚本不会回显密码、TOTP secret 或派生密钥。
 
-部署顺序固定为运行材料、证书、migration、数据库角色、Stalwart Bootstrap、Keycloak、测试身份、
-长期服务和内部验证。公网 Nginx 在容器内额外监听 `443`，供 backend 网络按正式 issuer 完成严格 TLS
+部署顺序固定为运行材料、证书、migration、数据库角色、Stalwart Bootstrap、Keycloak、client 前台退出
+属性 reconcile、测试身份、长期服务和内部验证。公网 Nginx 在容器内额外监听 `443`，供 backend 网络按正式 issuer 完成严格 TLS
 OIDC discovery；部署脚本会在启动 API 前先验证该路径。只有全部内部验证通过后，才原子更新
 `/opt/mail-suite/current` 并放行公网端口。
 Web 健康检查也通过 backend 别名访问 `https://mail.test.snowye.fun/health/ready`，不会跳过证书校验或
@@ -126,7 +126,13 @@ Keycloak 就绪后，部署会通过 Admin REST 为 browser flow 的唯一 OTP e
 ```bash
 bash /opt/mail-suite/current/deploy/server/configure-keycloak-amr.sh \
   /opt/mail-suite/current --check
+python3 /opt/mail-suite/current/deploy/server/reconcile-keycloak-client.py \
+  --deployment-root /opt/mail-suite/current --check
 ```
+
+client reconcile 固定操作 `mail-suite-test` 的 `post.logout.redirect.uris`，管理密码只从
+`/opt/mail-suite/shared/runtime.env` 在进程内读取。首次修改前把旧的非秘密属性保存为
+`0600 root:root` 回滚标记；重复执行不写入，其他 client 字段保持不变。
 
 目标 2 GB ECS 上 Keycloak 首次增强、建表和 realm 导入约需 4 分钟；容器健康检查读取管理端真实
 `/health/ready`，不会把端口已监听但仍返回 `503` 的初始化阶段误判为可用。
@@ -139,8 +145,8 @@ bash /opt/mail-suite/current/deploy/server/configure-keycloak-amr.sh \
 bash /opt/mail-suite/current/deploy/server/verify.sh
 ```
 
-验证覆盖容器健康和资源限制、secret 权限、recovery 清理、数据库隔离、发布端口、OIDC issuer、IdP
-管理路径拒绝、Stalwart 严格 TLS、SMTP STARTTLS、UFW 和非回环 listener。验证脚本不会展开
+验证覆盖容器健康和资源限制、secret 权限、recovery 清理、数据库隔离、发布端口、OIDC issuer、
+end-session endpoint、精确 post-logout URI、IdP 管理路径拒绝、Stalwart 严格 TLS、SMTP STARTTLS、UFW 和非回环 listener。验证脚本不会展开
 Compose 配置或回显运行 secret。
 
 还必须从 ECS 之外的网络独立验证：
@@ -181,6 +187,14 @@ bash /opt/mail-suite/current/deploy/server/install-public-certificates.sh \
 ```bash
 bash /opt/mail-suite/current/deploy/server/configure-keycloak-amr.sh \
   /opt/mail-suite/current --rollback
+```
+
+严格回滚 Keycloak 前台退出属性时，脚本只恢复首次 reconcile 保存的旧属性值；若当前属性已被其他管理
+操作改动则拒绝覆盖：
+
+```bash
+python3 /opt/mail-suite/current/deploy/server/reconcile-keycloak-client.py \
+  --deployment-root /opt/mail-suite/current --rollback
 ```
 
 ## PostgreSQL 只读隧道

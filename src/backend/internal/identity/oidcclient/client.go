@@ -26,12 +26,13 @@ var errProviderResponseTooLarge = errors.New("OIDC provider 响应超过大小�
 
 // Client 封装 discovery 结果、OAuth2 code exchange 与 ID token 验证器。
 type Client struct {
-	oauthConfig *oauth2.Config
-	verifier    *oidc.IDTokenVerifier
-	httpClient  *http.Client
-	issuer      string
-	clientID    string
-	now         func() time.Time
+	oauthConfig       *oauth2.Config
+	verifier          *oidc.IDTokenVerifier
+	httpClient        *http.Client
+	issuer            string
+	clientID          string
+	providerLogoutURL string
+	now               func() time.Time
 }
 
 // discoveryMetadata 是启动时必须确认的最小 OIDC provider 能力集合。
@@ -39,6 +40,7 @@ type discoveryMetadata struct {
 	AuthorizationEndpoint         string   `json:"authorization_endpoint"`
 	TokenEndpoint                 string   `json:"token_endpoint"`
 	JWKSURI                       string   `json:"jwks_uri"`
+	EndSessionEndpoint            string   `json:"end_session_endpoint"`
 	ResponseTypesSupported        []string `json:"response_types_supported"`
 	CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported"`
 }
@@ -133,6 +135,14 @@ func newWithHTTPClient(
 	if err = validateDiscovery(metadata); err != nil {
 		return nil, err
 	}
+	providerLogoutURL, err := buildProviderLogoutURL(
+		metadata.EndSessionEndpoint,
+		config.ClientID,
+		config.PostLogoutRedirectURI,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	verifierContext := oidc.ClientContext(context.Background(), &httpClient)
 	verifier := provider.VerifierContext(verifierContext, &oidc.Config{
@@ -147,11 +157,12 @@ func newWithHTTPClient(
 			RedirectURL:  config.RedirectURI,
 			Scopes:       append([]string(nil), config.Scopes...),
 		},
-		verifier:   verifier,
-		httpClient: &httpClient,
-		issuer:     config.Issuer,
-		clientID:   config.ClientID,
-		now:        func() time.Time { return time.Now().UTC() },
+		verifier:          verifier,
+		httpClient:        &httpClient,
+		issuer:            config.Issuer,
+		clientID:          config.ClientID,
+		providerLogoutURL: providerLogoutURL,
+		now:               func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -166,6 +177,11 @@ func (client *Client) AuthorizationURL(state, nonce, challenge string) (string, 
 		oauth2.SetAuthURLParam("code_challenge", challenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 	), nil
+}
+
+// ProviderLogoutURL 返回启动时验证并构造的前台退出地址，不包含用户凭据。
+func (client *Client) ProviderLogoutURL() string {
+	return client.providerLogoutURL
 }
 
 // Exchange 使用 authorization code 和 verifier 获取并校验 ID token 的全部认证证据。
@@ -218,16 +234,44 @@ func (client *Client) Exchange(ctx context.Context, code, verifier string) (iden
 // validateDiscovery 拒绝降级端点和缺少 Authorization Code + PKCE S256 能力的 provider。
 func validateDiscovery(metadata discoveryMetadata) error {
 	for _, endpoint := range []string{metadata.AuthorizationEndpoint, metadata.TokenEndpoint, metadata.JWKSURI} {
-		parsed, err := url.ParseRequestURI(endpoint)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Opaque != "" {
 			return errors.New("OIDC discovery 包含不安全端点")
 		}
+	}
+	endSessionEndpoint, err := url.Parse(metadata.EndSessionEndpoint)
+	if err != nil || endSessionEndpoint.Scheme != "https" || endSessionEndpoint.Host == "" ||
+		endSessionEndpoint.User != nil || endSessionEndpoint.Fragment != "" || endSessionEndpoint.RawQuery != "" ||
+		endSessionEndpoint.Opaque != "" {
+		return errors.New("OIDC discovery 包含不安全的 end-session endpoint")
 	}
 	if !slices.Contains(metadata.ResponseTypesSupported, "code") ||
 		!slices.Contains(metadata.CodeChallengeMethodsSupported, "S256") {
 		return errors.New("OIDC provider 不支持 Authorization Code + PKCE S256")
 	}
 	return nil
+}
+
+// buildProviderLogoutURL 只使用已验证配置构造不可变的浏览器前台退出地址。
+func buildProviderLogoutURL(endpoint, clientID, postLogoutRedirectURI string) (string, error) {
+	if clientID == "" || postLogoutRedirectURI == "" {
+		return "", errors.New("OIDC 前台退出配置无效")
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", errors.New("OIDC 前台退出配置无效")
+	}
+	postLogoutRedirect, err := url.Parse(postLogoutRedirectURI)
+	if err != nil || postLogoutRedirect.Scheme != "https" || postLogoutRedirect.Host == "" ||
+		postLogoutRedirect.User != nil || postLogoutRedirect.Path != "/" || postLogoutRedirect.RawQuery != "" ||
+		postLogoutRedirect.Fragment != "" || postLogoutRedirect.Opaque != "" {
+		return "", errors.New("OIDC 前台退出配置无效")
+	}
+	query := parsed.Query()
+	query.Set("client_id", clientID)
+	query.Set("post_logout_redirect_uri", postLogoutRedirectURI)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 // exchangeError 区分 provider 明确拒绝 code 与依赖网络不可用。

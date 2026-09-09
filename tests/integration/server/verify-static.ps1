@@ -16,7 +16,9 @@ $configureRenewalPath = Join-Path $repositoryRoot 'deploy\server\configure-alidn
 $installCertificatesPath = Join-Path $repositoryRoot 'deploy\server\install-public-certificates.sh'
 $bootstrapStalwartPath = Join-Path $repositoryRoot 'deploy\server\bootstrap-stalwart.sh'
 $configureKeycloakAmrPath = Join-Path $repositoryRoot 'deploy\server\configure-keycloak-amr.sh'
+$reconcileKeycloakClientPath = Join-Path $repositoryRoot 'deploy\server\reconcile-keycloak-client.py'
 $verifyPath = Join-Path $repositoryRoot 'deploy\server\verify.sh'
+$realmTemplatePath = Join-Path $repositoryRoot 'deploy\server\config\keycloak-realm.template.json'
 
 # Assert-Contains 要求服务器制品保留指定的安全或运行契约。
 function Assert-Contains {
@@ -46,6 +48,7 @@ $configureRenewal = Get-Content -Raw -LiteralPath $configureRenewalPath
 $installCertificates = Get-Content -Raw -LiteralPath $installCertificatesPath
 $bootstrapStalwart = Get-Content -Raw -LiteralPath $bootstrapStalwartPath
 $configureKeycloakAmr = Get-Content -Raw -LiteralPath $configureKeycloakAmrPath
+$reconcileKeycloakClient = Get-Content -Raw -LiteralPath $reconcileKeycloakClientPath
 $verify = Get-Content -Raw -LiteralPath $verifyPath
 
 # Linux 发布归档必须覆盖开发机的全局 autocrlf 设置，避免脚本在目标机解析失败。
@@ -62,6 +65,7 @@ if ($compose -match '--no-check-certificate') {
 }
 Assert-Contains -Text $compose -Pattern 'STALWART_RECOVERY_ADMIN: \$\{MAIL_SUITE_STALWART_RECOVERY_ADMIN:-\}' -Message 'Stalwart recovery value must default to empty'
 Assert-Contains -Text $compose -Pattern 'MAIL_SUITE_STALWART_CA_FILE: /etc/ssl/certs/ca-certificates\.crt' -Message 'Worker strict public CA configuration is missing'
+Assert-Contains -Text $compose -Pattern 'MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI: https://mail\.test\.snowye\.fun/' -Message 'API post-logout redirect configuration is missing'
 if ([regex]::Matches($compose, '(?m)^\s{4}healthcheck:$').Count -ne 5) {
     throw 'The five services without an image healthcheck must define one in Compose'
 }
@@ -79,7 +83,10 @@ Assert-Contains -Text $nginx -Pattern 'server keycloak:8080 resolve;' -Message '
 if ([regex]::Matches($nginx, '(?m)^\s*listen 443 ssl(?: default_server)?;$').Count -ne 3) {
     throw 'Every public TLS virtual host must also listen on Docker-internal port 443'
 }
-Assert-Contains -Text $deploy -Pattern 'compose exec -T web wget -q -O /dev/null.*\\\s*\r?\n\s*"https://idp\.test\.snowye\.fun/realms/mail-suite-test/\.well-known/openid-configuration"' -Message 'Pre-API internal OIDC discovery probe is missing'
+Assert-Contains -Text $deploy -Pattern 'compose exec -T web wget -q -O -.*\\\s*\r?\n\s*"https://idp\.test\.snowye\.fun/realms/mail-suite-test/\.well-known/openid-configuration"' -Message 'Pre-API internal OIDC discovery probe is missing'
+Assert-Contains -Text $deploy -Pattern 'reconcile-keycloak-client\.py.*[\s\S]*--deployment-root.*--apply' -Message 'Deployment does not reconcile the Keycloak post-logout URI before API startup'
+Assert-Contains -Text $verify -Pattern 'reconcile-keycloak-client\.py.*[\s\S]*--deployment-root.*--check' -Message 'Host verification does not check the Keycloak post-logout URI'
+Assert-Contains -Text $verify -Pattern 'post_logout_redirect_uri=https://mail\.test\.snowye\.fun/' -Message 'Host verification does not probe the registered post-logout URI'
 Assert-Contains -Text $deploy -Pattern 'wait_test_mailbox_operation' -Message 'Deployment does not wait for the active test mailbox operation'
 Assert-Contains -Text $deploy -Pattern "operations\.status IN \('failed', 'dead', 'superseded'\)" -Message 'Mailbox wait does not stop on terminal operation failure'
 Assert-Contains -Text $deploy -Pattern 'configure-keycloak-amr\.sh.*--apply' -Message 'Deployment does not reconcile Keycloak OTP AMR before API startup'
@@ -91,6 +98,20 @@ Assert-Contains -Text $configureKeycloakAmr -Pattern 'BEGIN TRANSACTION READ ONL
 Assert-Contains -Text $configureKeycloakAmr -Pattern 'authenticator_config_entry' -Message 'Exact Keycloak authenticator config values are not verified'
 if ($configureKeycloakAmr -match '--password') {
     throw 'Keycloak administrator password must not be passed in command arguments'
+}
+Assert-Contains -Text $reconcileKeycloakClient -Pattern 'NoRedirectHandler' -Message 'Keycloak client reconcile must reject redirects'
+Assert-Contains -Text $reconcileKeycloakClient -Pattern 'MAXIMUM_RESPONSE_BYTES' -Message 'Keycloak client reconcile response size is not bounded'
+Assert-Contains -Text $reconcileKeycloakClient -Pattern 'MAIL_SUITE_KEYCLOAK_ADMIN_PASSWORD=' -Message 'Keycloak client reconcile does not read the restricted runtime secret'
+Assert-Contains -Text $reconcileKeycloakClient -Pattern 'application/x-www-form-urlencoded' -Message 'Keycloak administrator password is not sent in a request body'
+if ($reconcileKeycloakClient -match '(?m)password.*add_argument') {
+    throw 'Keycloak administrator password must not be accepted as a command argument'
+}
+
+$realmTemplate = Get-Content -Raw -LiteralPath $realmTemplatePath | ConvertFrom-Json
+$realmClient = @($realmTemplate.clients | Where-Object { $_.clientId -eq 'mail-suite-test' })
+if ($realmClient.Count -ne 1 -or
+    $realmClient[0].attributes.'post.logout.redirect.uris' -ne 'https://mail.test.snowye.fun/') {
+    throw 'Keycloak realm template post-logout URI is not exact'
 }
 
 foreach ($hostname in @('mail.test.snowye.fun', 'idp.test.snowye.fun', 'mx1.test.snowye.fun')) {
@@ -174,4 +195,5 @@ if ($aliDnsPolicy.Statement.Count -ne 1 -or
     manualDnsFallback = 'three-resolver-stable'
     recoveryCredential = 'one-time'
     temporaryCredentials = 'cleanup-trapped'
+    oidcFrontchannelLogout = 'reconciled-and-probed'
 } | ConvertTo-Json

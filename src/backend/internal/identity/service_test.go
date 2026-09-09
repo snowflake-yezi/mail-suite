@@ -14,6 +14,7 @@ import (
 type fakeOIDCProvider struct {
 	identity  OIDCIdentity
 	exchange  error
+	logoutURL string
 	state     string
 	nonce     string
 	challenge string
@@ -32,6 +33,11 @@ func (provider *fakeOIDCProvider) Exchange(context.Context, string, string) (OID
 	return provider.identity, provider.exchange
 }
 
+// ProviderLogoutURL 返回测试预设的前台退出地址。
+func (provider *fakeOIDCProvider) ProviderLogoutURL() string {
+	return provider.logoutURL
+}
+
 // fakeIdentityRepository 记录领域服务是否使用预期的持久化原子边界。
 type fakeIdentityRepository struct {
 	createdFlow      AuthFlowToCreate
@@ -45,6 +51,7 @@ type fakeIdentityRepository struct {
 	resolveErr       error
 	revokedDigest    [32]byte
 	revokeAudit      AuditEvent
+	revokeErr        error
 	recordedAudits   []AuditEvent
 	atomicCreateCall int
 	atomicRevokeCall int
@@ -115,7 +122,7 @@ func (repository *fakeIdentityRepository) RevokeSessionWithAudit(
 	repository.atomicRevokeCall++
 	repository.revokedDigest = digest
 	repository.revokeAudit = event
-	return nil
+	return repository.revokeErr
 }
 
 // RevokeByOIDCSessionID 满足后续 backchannel 使用的 repository 接口。
@@ -309,14 +316,64 @@ func TestResolveSessionAndLogoutRequireBoundCSRFToken(t *testing.T) {
 		t.Fatalf("CSRF 摘要损坏的旧会话应按匿名处理：view=%+v err=%v", invalidView, err)
 	}
 	repository.resolvedSession.CSRFDigest = hasher.Digest(SecretPurposeCSRFToken, csrfToken)
-	if err = service.Logout(context.Background(), sessionToken, "wrong", RequestMetadata{RequestID: "request-3"}); !HasErrorCode(err, ErrorCodeCSRFInvalid) {
+	if _, err = service.Logout(context.Background(), sessionToken, "wrong", RequestMetadata{RequestID: "request-3"}); !HasErrorCode(err, ErrorCodeCSRFInvalid) {
 		t.Fatalf("错误 CSRF token 必须拒绝退出，实际为 %v", err)
 	}
-	if err = service.Logout(context.Background(), sessionToken, csrfToken, RequestMetadata{RequestID: "request-4"}); err != nil {
+	result, err := service.Logout(context.Background(), sessionToken, csrfToken, RequestMetadata{RequestID: "request-4"})
+	if err != nil {
 		t.Fatalf("有效 CSRF token 退出失败：%v", err)
+	}
+	if result.ProviderLogoutURL != provider.logoutURL {
+		t.Fatalf("退出成功未返回固定 provider URL：%+v", result)
 	}
 	if repository.atomicRevokeCall != 1 || repository.revokeAudit.Action != "logout" {
 		t.Fatalf("退出未使用原子撤销与审计：calls=%d audit=%+v", repository.atomicRevokeCall, repository.revokeAudit)
+	}
+}
+
+func TestLogoutIsIdempotentAndDoesNotReturnURLWhenPersistenceFails(t *testing.T) {
+	repository := &fakeIdentityRepository{}
+	provider := &fakeOIDCProvider{}
+	service, hasher, _ := newTestIdentityService(t, repository, provider)
+
+	result, err := service.Logout(context.Background(), "", "", RequestMetadata{})
+	if err != nil || result.ProviderLogoutURL != provider.logoutURL || repository.atomicRevokeCall != 0 {
+		t.Fatalf("匿名重复退出应直接返回固定导航：result=%+v err=%v calls=%d", result, err, repository.atomicRevokeCall)
+	}
+
+	const sessionToken = "session-cookie-value"
+	csrfToken := hasher.DeriveCSRFToken(sessionToken)
+	repository.resolvedSession = Session{
+		Principal:  Principal{ID: uuid.New()},
+		CSRFDigest: hasher.Digest(SecretPurposeCSRFToken, csrfToken),
+	}
+	repository.revokeErr = NewError(ErrorCodePersistenceUnavailable)
+	result, err = service.Logout(context.Background(), sessionToken, csrfToken, RequestMetadata{})
+	if !HasErrorCode(err, ErrorCodePersistenceUnavailable) || result.ProviderLogoutURL != "" {
+		t.Fatalf("撤销失败不得返回 provider URL：result=%+v err=%v", result, err)
+	}
+}
+
+func TestNewServiceRejectsProviderWithoutLogoutURL(t *testing.T) {
+	hasher, err := NewSecretHasher(bytes.Repeat([]byte{0x71}, 32))
+	if err != nil {
+		t.Fatalf("创建测试摘要器失败：%v", err)
+	}
+	cipherBox, err := NewPKCECipher("test-v1", map[string][]byte{
+		"test-v1": bytes.Repeat([]byte{0x72}, 32),
+	})
+	if err != nil {
+		t.Fatalf("创建测试 PKCE cipher 失败：%v", err)
+	}
+	_, err = NewService(
+		&fakeIdentityRepository{},
+		&fakeOIDCProvider{},
+		hasher,
+		cipherBox,
+		MFAPolicy{AllowedACR: []string{"urn:example:mfa"}},
+	)
+	if err == nil {
+		t.Fatal("缺少 provider 前台退出地址必须阻止认证服务装配")
 	}
 }
 
@@ -327,6 +384,9 @@ func newTestIdentityService(
 	provider OIDCProvider,
 ) (*Service, *SecretHasher, *PKCECipher) {
 	t.Helper()
+	if fakeProvider, ok := provider.(*fakeOIDCProvider); ok && fakeProvider.logoutURL == "" {
+		fakeProvider.logoutURL = "https://idp.example.test/logout?client_id=mail-suite-test"
+	}
 	hasher, err := NewSecretHasher(bytes.Repeat([]byte{0x71}, 32))
 	if err != nil {
 		t.Fatalf("创建测试摘要器失败：%v", err)

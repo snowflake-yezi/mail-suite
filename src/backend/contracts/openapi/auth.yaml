@@ -140,14 +140,18 @@ paths:
       operationId: logout
       tags:
         - Authentication
-      summary: 撤销当前本地会话
-      description: 重复退出保持幂等；本地撤销必须先于任何可选 IdP end-session 跳转。
+      summary: 退出当前浏览器会话
+      description: >-
+        重复退出保持幂等；本地撤销和成功审计必须先于返回 provider 前台退出地址。
+        返回地址由服务端固定配置构造，不包含用户凭据。
       parameters:
         - $ref: "#/components/parameters/CsrfToken"
       responses:
-        "204":
-          description: 当前本地会话已撤销或本来就不存在。
+        "200":
+          description: 当前本地会话已撤销或本来就不存在，浏览器应继续执行 provider 前台退出。
           headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
             Set-Cookie:
               description: >-
                 使用 Max-Age=0 清理 __Host-mail_suite_session；属性保持 Secure、HttpOnly、
@@ -155,6 +159,10 @@ paths:
               required: true
               schema:
                 type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResponse"
         "403":
           $ref: "#/components/responses/CsrfRejected"
         "429":
@@ -312,6 +320,21 @@ components:
                   message: 登录服务暂时不可用
                   request_id: "00000000000000000000000000000000"
   schemas:
+    LogoutResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - logged_out
+        - provider_logout_url
+      properties:
+        logged_out:
+          type: boolean
+          const: true
+        provider_logout_url:
+          type: string
+          format: uri
+          pattern: "^https://"
+          description: 启动时验证并构造的 IdP 前台退出地址，不包含用户凭据。
     Session:
       oneOf:
         - $ref: "#/components/schemas/AnonymousSession"

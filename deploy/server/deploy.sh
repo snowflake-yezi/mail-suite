@@ -27,6 +27,7 @@ require_root_and_files() {
     "${release_dir}/deploy/server/configure-readonly-database.sh" \
     "${release_dir}/deploy/server/configure-keycloak-database.sh" \
     "${release_dir}/deploy/server/configure-keycloak-amr.sh" \
+    "${release_dir}/deploy/server/reconcile-keycloak-client.py" \
     "${release_dir}/deploy/server/bootstrap-stalwart.sh" \
     "${release_dir}/deploy/server/verify.sh" \
     "${release_dir}/deploy/server/config/keycloak-realm.template.json" \
@@ -134,12 +135,15 @@ configure_public_firewall() {
 
 # verify_internal_oidc_discovery 在启动 API 前验证正式 issuer 的 Docker 内网 TLS 路径。
 verify_internal_oidc_discovery() {
-  local attempt
+  local attempt discovery end_session_endpoint
   for attempt in {1..30}; do
-    if compose exec -T web wget -q -O /dev/null \
-      "https://idp.test.snowye.fun/realms/mail-suite-test/.well-known/openid-configuration"; then
-      echo "OIDC Docker 内网 discovery 路径已就绪"
-      return
+    if discovery="$(compose exec -T web wget -q -O - \
+      "https://idp.test.snowye.fun/realms/mail-suite-test/.well-known/openid-configuration")"; then
+      end_session_endpoint="$(jq -r '.end_session_endpoint // empty' <<<"${discovery}")"
+      if [[ "${end_session_endpoint}" == "https://idp.test.snowye.fun/realms/mail-suite-test/protocol/openid-connect/logout" ]]; then
+        echo "OIDC Docker 内网 discovery 与 end-session 路径已就绪"
+        return
+      fi
     fi
     sleep 1
   done
@@ -216,6 +220,8 @@ deploy_release() {
 
   compose up -d keycloak web
   verify_internal_oidc_discovery
+  python3 "${release_dir}/deploy/server/reconcile-keycloak-client.py" \
+    --deployment-root "${release_dir}" --apply
   bash "${release_dir}/deploy/server/configure-keycloak-amr.sh" "${release_dir}" --apply
   compose --profile tools run --rm identity-bootstrap --check --manifest /run/test-identity.json
   compose --profile tools run --rm identity-bootstrap --apply --manifest /run/test-identity.json

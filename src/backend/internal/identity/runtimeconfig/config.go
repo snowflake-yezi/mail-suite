@@ -39,6 +39,8 @@ type Config struct {
 	ClientSecret string
 	// RedirectURI 是 IdP 唯一允许回调的同源 HTTPS 地址。
 	RedirectURI string
+	// PostLogoutRedirectURI 是 IdP 完成前台退出后唯一允许返回的可信主站根 URL。
+	PostLogoutRedirectURI string
 	// TrustedOrigin 是所有浏览器状态改变请求必须匹配的主站 origin。
 	TrustedOrigin string
 	// Scopes 是 authorization request 请求的最小 OIDC scope 集合。
@@ -84,12 +86,23 @@ func Load() (Config, error) {
 	if redirectURL.Path != "/api/v1/auth/callback" || redirectURL.RawQuery != "" {
 		return Config{}, errors.New("配置 MAIL_SUITE_OIDC_REDIRECT_URI 必须使用 /api/v1/auth/callback 路径")
 	}
+	postLogoutRedirectURI, err := requiredHTTPSURL("MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI", false)
+	if err != nil {
+		return Config{}, err
+	}
+	postLogoutRedirectURL, _ := url.Parse(postLogoutRedirectURI)
+	if postLogoutRedirectURL.Path != "/" || postLogoutRedirectURL.RawQuery != "" {
+		return Config{}, errors.New("配置 MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI 必须使用根路径 /")
+	}
 	trustedOrigin, err := requiredHTTPSURL("MAIL_SUITE_AUTH_TRUSTED_ORIGIN", true)
 	if err != nil {
 		return Config{}, err
 	}
 	if redirectURL.Scheme+"://"+redirectURL.Host != trustedOrigin {
 		return Config{}, errors.New("配置 MAIL_SUITE_OIDC_REDIRECT_URI 必须与 MAIL_SUITE_AUTH_TRUSTED_ORIGIN 同源")
+	}
+	if postLogoutRedirectURL.Scheme+"://"+postLogoutRedirectURL.Host != trustedOrigin {
+		return Config{}, errors.New("配置 MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI 必须与 MAIL_SUITE_AUTH_TRUSTED_ORIGIN 同源")
 	}
 
 	clientID, err := requiredTrimmed("MAIL_SUITE_OIDC_CLIENT_ID")
@@ -143,20 +156,21 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Mode:                mode,
-		Issuer:              issuer,
-		ClientID:            clientID,
-		ClientSecret:        clientSecret,
-		RedirectURI:         redirectURI,
-		TrustedOrigin:       trustedOrigin,
-		Scopes:              scopes,
-		SigningAlgorithms:   signingAlgorithms,
-		AdminAllowedACR:     allowedACR,
-		AdminRequiredAMR:    requiredAMR,
-		SecretPepper:        pepper,
-		FlowEncryptionKey:   flowKey,
-		FlowEncryptionKeyID: keyID,
-		ProviderTimeout:     providerTimeout,
+		Mode:                  mode,
+		Issuer:                issuer,
+		ClientID:              clientID,
+		ClientSecret:          clientSecret,
+		RedirectURI:           redirectURI,
+		PostLogoutRedirectURI: postLogoutRedirectURI,
+		TrustedOrigin:         trustedOrigin,
+		Scopes:                scopes,
+		SigningAlgorithms:     signingAlgorithms,
+		AdminAllowedACR:       allowedACR,
+		AdminRequiredAMR:      requiredAMR,
+		SecretPepper:          pepper,
+		FlowEncryptionKey:     flowKey,
+		FlowEncryptionKeyID:   keyID,
+		ProviderTimeout:       providerTimeout,
 	}, nil
 }
 
@@ -166,8 +180,8 @@ func requiredHTTPSURL(name string, originOnly bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	parsed, parseErr := url.ParseRequestURI(raw)
-	if parseErr != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+	parsed, parseErr := url.Parse(raw)
+	if parseErr != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.Opaque != "" {
 		return "", fmt.Errorf("配置 %s 必须是无凭据的 HTTPS URL", name)
 	}
 	if originOnly && (parsed.Path != "" || parsed.RawQuery != "") {

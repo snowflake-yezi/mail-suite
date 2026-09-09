@@ -33,6 +33,9 @@
       "webOrigins": [
         "https://mail.test.snowye.fun"
       ],
+      "attributes": {
+        "post.logout.redirect.uris": "https://mail.test.snowye.fun/"
+      },
       "protocolMappers": [
         {
           "name": "mail-suite-amr",

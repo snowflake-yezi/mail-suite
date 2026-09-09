@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { getCurrentSession, readSessionResponse } from './session'
+import {
+  getCurrentSession,
+  logoutCurrentSession,
+  readLogoutResponse,
+  readSessionResponse,
+} from './session'
 
 const activeSessionExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString()
 
@@ -69,5 +74,103 @@ describe('会话响应解析', () => {
     await expect(getCurrentSession()).resolves.toEqual({
       authenticated: false,
     })
+  })
+})
+
+describe('退出响应解析', () => {
+  it('accepts the exact HTTPS provider logout response', async () => {
+    const providerURL =
+      'https://idp.example.test/logout?client_id=mail-suite-test&post_logout_redirect_uri=https%3A%2F%2Fmail.example.test%2F'
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          logged_out: true,
+          provider_logout_url: providerURL,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    await expect(
+      logoutCurrentSession('csrf-token-with-at-least-32-bytes'),
+    ).resolves.toEqual({ providerLogoutUrl: providerURL })
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/v1/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: expect.objectContaining({
+          'X-CSRF-Token': 'csrf-token-with-at-least-32-bytes',
+        }),
+      }),
+    )
+  })
+
+  it.each([
+    ['old 204 response', undefined, 204],
+    [
+      'wrong discriminator',
+      {
+        logged_out: false,
+        provider_logout_url: 'https://idp.example.test/logout',
+      },
+      200,
+    ],
+    [
+      'extra field',
+      {
+        logged_out: true,
+        provider_logout_url: 'https://idp.example.test/logout',
+        token: 'unexpected',
+      },
+      200,
+    ],
+    [
+      'HTTP URL',
+      {
+        logged_out: true,
+        provider_logout_url: 'http://idp.example.test/logout',
+      },
+      200,
+    ],
+    [
+      'credential URL',
+      {
+        logged_out: true,
+        provider_logout_url: 'https://user@idp.example.test/logout',
+      },
+      200,
+    ],
+    [
+      'fragment URL',
+      {
+        logged_out: true,
+        provider_logout_url: 'https://idp.example.test/logout#fragment',
+      },
+      200,
+    ],
+  ])('rejects %s', async (_name, payload, status) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      payload === undefined
+        ? new Response(null, { status })
+        : new Response(JSON.stringify(payload), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+    )
+
+    await expect(
+      logoutCurrentSession('csrf-token-with-at-least-32-bytes'),
+    ).rejects.toThrow('退出')
+  })
+
+  it('rejects malformed values without invoking fetch', () => {
+    expect(() => readLogoutResponse(null)).toThrow('退出接口响应无效')
+    expect(() =>
+      readLogoutResponse({
+        logged_out: true,
+        provider_logout_url: ' https://idp.example.test/logout',
+      }),
+    ).toThrow('退出接口响应无效')
   })
 })

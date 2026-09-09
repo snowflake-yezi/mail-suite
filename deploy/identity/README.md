@@ -52,9 +52,9 @@ named volume；API 只挂载 Keycloak CA，不挂载任何私钥。浏览器只�
 
 `verify-local.ps1` 默认只验证镜像引用固定、Compose 解析、独立短期证书、真实 TOTP/AMR realm 结构、
 realm 与 manifest 一致性，以及 `identity-bootstrap --check`。`-Running` 额外用证书指纹固定方式读取
-宿主 discovery 和匿名 session，从后端容器网络读取同一 issuer，并检查 Keycloak/Web 只能读取自己的
-私钥挂载。
+宿主 discovery、固定 end-session endpoint 和匿名 session，从后端容器网络读取同一 issuer，并检查
+Keycloak/Web 只能读取自己的私钥挂载。临时 realm 为 client 登记精确主站根路径作为 post-logout URI。
 
 固定 Keycloak 镜像尚未在当前工作区启动，mailbox/administrator 的真实 Code + PKCE、管理员 TOTP
-挑战、三类拒绝身份、AMR claim、IdP 停止恢复和退出仍必须在 Docker engine 恢复后运行，未执行前不得
-声称互操作或 MFA 已完成。
+挑战、三类拒绝身份、AMR claim、前台退出确认/回跳、双向换号以及 IdP 停止恢复仍必须在 Docker engine
+恢复后运行，未执行前不得声称互操作、MFA 或账号切换已完成。

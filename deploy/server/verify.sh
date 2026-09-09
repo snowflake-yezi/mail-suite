@@ -341,7 +341,7 @@ verify_keycloak_database_access() {
 
 # verify_https_routes 验证主站、固定 issuer 和 IdP 管理路径阻断。
 verify_https_routes() {
-  local discovery issuer admin_status redirect_status
+  local discovery issuer end_session_endpoint logout_status admin_status redirect_status
   curl --fail --silent --show-error \
     --resolve "mail.test.snowye.fun:${preview_port}:127.0.0.1" \
     "https://mail.test.snowye.fun:${preview_port}/health/live" >/dev/null
@@ -352,8 +352,20 @@ verify_https_routes() {
     --resolve "idp.test.snowye.fun:${preview_port}:127.0.0.1" \
     "https://idp.test.snowye.fun:${preview_port}/realms/mail-suite-test/.well-known/openid-configuration")"
   issuer="$(jq -r '.issuer // empty' <<<"${discovery}")"
-  if [[ "${issuer}" != "https://idp.test.snowye.fun/realms/mail-suite-test" ]]; then
-    echo "Keycloak discovery issuer 与公网契约不一致" >&2
+  end_session_endpoint="$(jq -r '.end_session_endpoint // empty' <<<"${discovery}")"
+  if [[ "${issuer}" != "https://idp.test.snowye.fun/realms/mail-suite-test" ||
+        "${end_session_endpoint}" != "https://idp.test.snowye.fun/realms/mail-suite-test/protocol/openid-connect/logout" ]]; then
+    echo "Keycloak discovery issuer 或 end-session endpoint 与公网契约不一致" >&2
+    exit 1
+  fi
+  logout_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --resolve "idp.test.snowye.fun:${preview_port}:127.0.0.1" \
+    --get \
+    --data-urlencode 'client_id=mail-suite-test' \
+    --data-urlencode 'post_logout_redirect_uri=https://mail.test.snowye.fun/' \
+    "https://idp.test.snowye.fun:${preview_port}/realms/mail-suite-test/protocol/openid-connect/logout")"
+  if [[ "${logout_status}" != "200" && "${logout_status}" != "302" && "${logout_status}" != "303" ]]; then
+    echo "Keycloak 前台退出回跳配置未进入标准流程" >&2
     exit 1
   fi
   admin_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -370,7 +382,7 @@ verify_https_routes() {
     echo "HTTP 入口没有固定跳转 HTTPS" >&2
     exit 1
   fi
-  echo "主站 HTTPS、OIDC issuer 与 IdP 路径隔离验证通过"
+  echo "主站 HTTPS、OIDC issuer、前台退出与 IdP 路径隔离验证通过"
 }
 
 # verify_stalwart_tls 使用永久管理员和系统 CA 做无跳过校验的内部请求。
@@ -524,6 +536,8 @@ verify_public_firewall() {
 compose ps
 compose --profile tools run --rm migrator --status
 compose --profile tools run --rm identity-bootstrap --check --manifest /run/test-identity.json
+python3 "${release_dir}/deploy/server/reconcile-keycloak-client.py" \
+  --deployment-root "${release_dir}" --check
 bash "${release_dir}/deploy/server/configure-keycloak-amr.sh" "${release_dir}" --check
 verify_secret_boundaries
 verify_container_constraints

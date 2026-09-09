@@ -97,7 +97,7 @@ go run ./src/backend/cmd/worker
 
 `MAIL_SUITE_AUTH_MODE=disabled` 不注册认证路由，只用于当前回环预览。启用 OIDC 时必须显式使用
 `oidc`，并完整注入以下运行时配置；缺少配置、discovery 失败或 provider 不支持
-Authorization Code + PKCE S256 时 API 启动失败，不会回退到 `disabled`：
+Authorization Code + PKCE S256 或安全 `end_session_endpoint` 时 API 启动失败，不会回退到 `disabled`：
 
 | 环境变量                                     | 约束                                                              |
 | -------------------------------------------- | ----------------------------------------------------------------- |
@@ -105,6 +105,7 @@ Authorization Code + PKCE S256 时 API 启动失败，不会回退到 `disabled`
 | `MAIL_SUITE_OIDC_CLIENT_ID`                  | 机密后端 OIDC client 标识                                         |
 | `MAIL_SUITE_OIDC_CLIENT_SECRET`              | 仅从部署 secret 注入，不写入仓库                                  |
 | `MAIL_SUITE_OIDC_REDIRECT_URI`               | 与主站同源的 `https://.../api/v1/auth/callback`                    |
+| `MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI`   | 与主站同源且路径精确为 `/` 的 HTTPS 前台退出回跳                   |
 | `MAIL_SUITE_AUTH_TRUSTED_ORIGIN`             | 无路径的 HTTPS 主站 origin，用于 Origin/Referer 校验               |
 | `MAIL_SUITE_OIDC_SCOPES`                     | 默认 `openid profile email`，必须包含 `openid`                    |
 | `MAIL_SUITE_OIDC_SIGNING_ALGORITHMS`         | 默认且建议 `RS256`；可选集合仅允许 `RS256`、`PS256`、`ES256`       |
@@ -129,7 +130,9 @@ $env:MAIL_SUITE_AUTH_FLOW_ENCRYPTION_KEY = New-MailSuiteSecret
 
 OIDC 模式注册 `GET /api/v1/auth/login`、`GET /api/v1/auth/callback`、
 `GET /api/v1/session` 和 `POST /api/v1/auth/logout`。会话只使用 Secure、HttpOnly、SameSite=Lax 的
-`__Host-` Cookie，因此启用时必须由同源 HTTPS 入口代理，不能直接用明文 HTTP 验收登录。
+`__Host-` Cookie，因此启用时必须由同源 HTTPS 入口代理，不能直接用明文 HTTP 验收登录。退出接口先在
+PostgreSQL 撤销本地会话并返回启动时构造的 provider URL，Web 清理敏感缓存后使用顶层替换导航进入
+OIDC 前台退出；不保存 ID token，也不接受浏览器提供任意回跳地址。
 
 ## 受控测试身份初始化
 

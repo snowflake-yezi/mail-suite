@@ -22,6 +22,7 @@ type fakeAuthService struct {
 	rejectErr      error
 	sessionView    *identity.SessionView
 	sessionErr     error
+	logoutResult   identity.LogoutResult
 	logoutErr      error
 	callbackInput  identity.CallbackInput
 	logoutToken    string
@@ -66,11 +67,11 @@ func (service *fakeAuthService) Logout(
 	sessionToken string,
 	csrfToken string,
 	_ identity.RequestMetadata,
-) error {
+) (identity.LogoutResult, error) {
 	service.logoutCalls++
 	service.logoutToken = sessionToken
 	service.logoutCSRF = csrfToken
-	return service.logoutErr
+	return service.logoutResult, service.logoutErr
 }
 
 func TestLoginSetsHostCookieAndRedirectsToProvider(t *testing.T) {
@@ -176,7 +177,9 @@ func TestSessionReturnsAnonymousOrAuthenticatedDiscriminatedResponse(t *testing.
 }
 
 func TestLogoutRequiresTrustedOriginAndClearsCookieAfterSuccess(t *testing.T) {
-	service := &fakeAuthService{}
+	service := &fakeAuthService{logoutResult: identity.LogoutResult{
+		ProviderLogoutURL: "https://idp.example.test/logout?client_id=mail-suite-test",
+	}}
 	router := testRouter(t, service)
 	crossOriginRecorder := httptest.NewRecorder()
 	crossOriginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
@@ -192,13 +195,49 @@ func TestLogoutRequiresTrustedOriginAndClearsCookieAfterSuccess(t *testing.T) {
 	successRequest.Header.Set("X-CSRF-Token", "csrf-token")
 	successRequest.AddCookie(&http.Cookie{Name: identity.SessionCookieName, Value: "session-token"})
 	router.ServeHTTP(successRecorder, successRequest)
-	if successRecorder.Code != http.StatusNoContent || service.logoutCalls != 1 ||
+	if successRecorder.Code != http.StatusOK || service.logoutCalls != 1 ||
 		service.logoutToken != "session-token" || service.logoutCSRF != "csrf-token" {
 		t.Fatalf("同源退出调用错误：code=%d calls=%d", successRecorder.Code, service.logoutCalls)
 	}
 	cleared := findResponseCookie(t, successRecorder, identity.SessionCookieName)
 	if cleared.MaxAge >= 0 {
 		t.Fatalf("退出成功后必须清理会话 Cookie：%+v", cleared)
+	}
+	if successRecorder.Header().Get("Cache-Control") != "no-store" ||
+		successRecorder.Body.String() != "{\"logged_out\":true,\"provider_logout_url\":\"https://idp.example.test/logout?client_id=mail-suite-test\"}" {
+		t.Fatalf("退出成功响应错误：headers=%v body=%s", successRecorder.Header(), successRecorder.Body.String())
+	}
+}
+
+func TestLogoutFailureDoesNotClearCookieOrReturnProviderURL(t *testing.T) {
+	service := &fakeAuthService{
+		logoutResult: identity.LogoutResult{ProviderLogoutURL: "https://idp.example.test/logout"},
+		logoutErr:    identity.NewError(identity.ErrorCodePersistenceUnavailable),
+	}
+	router := testRouter(t, service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	request.Header.Set("Origin", "https://mail.example.test")
+	request.Header.Set("X-CSRF-Token", "csrf-token")
+	request.AddCookie(&http.Cookie{Name: identity.SessionCookieName, Value: "session-token"})
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable || len(recorder.Header().Values("Set-Cookie")) != 0 ||
+		strings.Contains(recorder.Body.String(), "provider_logout_url") {
+		t.Fatalf("撤销失败不得清 Cookie 或返回 provider URL：code=%d headers=%v body=%s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestLogoutRejectsEmptyProviderURLWithoutClearingCookie(t *testing.T) {
+	service := &fakeAuthService{}
+	router := testRouter(t, service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	request.Header.Set("Origin", "https://mail.example.test")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable || len(recorder.Header().Values("Set-Cookie")) != 0 {
+		t.Fatalf("空 provider URL 不得清 Cookie：code=%d headers=%v", recorder.Code, recorder.Header())
 	}
 }
 

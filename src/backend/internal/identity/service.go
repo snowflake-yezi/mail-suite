@@ -38,6 +38,8 @@ type OIDCProvider interface {
 	AuthorizationURL(state, nonce, challenge string) (string, error)
 	// Exchange 使用一次性 code 和 verifier 换取并校验 ID token。
 	Exchange(context.Context, string, string) (OIDCIdentity, error)
+	// ProviderLogoutURL 返回启动时验证并构造的前台退出地址。
+	ProviderLogoutURL() string
 }
 
 // MFAPolicy 保存只有管理账号需要满足的 provider 认证证据约束。
@@ -96,16 +98,23 @@ type SessionView struct {
 	CSRFToken string
 }
 
+// LogoutResult 表示本地撤销提交后浏览器必须继续的受信任退出导航。
+type LogoutResult struct {
+	// ProviderLogoutURL 是不含用户凭据且不可由请求输入修改的 IdP 前台退出地址。
+	ProviderLogoutURL string
+}
+
 // Service 编排一次性 OIDC 流程、本地主体授权、服务端会话和安全审计。
 type Service struct {
-	repository Repository
-	provider   OIDCProvider
-	hasher     *SecretHasher
-	pkce       *PKCECipher
-	mfaPolicy  MFAPolicy
-	now        func() time.Time
-	newToken   func() (string, error)
-	newID      func() uuid.UUID
+	repository        Repository
+	provider          OIDCProvider
+	providerLogoutURL string
+	hasher            *SecretHasher
+	pkce              *PKCECipher
+	mfaPolicy         MFAPolicy
+	now               func() time.Time
+	newToken          func() (string, error)
+	newID             func() uuid.UUID
 }
 
 // NewService 创建认证应用服务；所有安全依赖必须显式注入且管理员 MFA 策略不能为空。
@@ -119,18 +128,23 @@ func NewService(
 	if repository == nil || provider == nil || hasher == nil || pkce == nil {
 		return nil, errors.New("认证服务依赖不能为空")
 	}
+	providerLogoutURL := provider.ProviderLogoutURL()
+	if providerLogoutURL == "" {
+		return nil, errors.New("OIDC provider 前台退出地址不能为空")
+	}
 	if len(mfaPolicy.AllowedACR) == 0 && len(mfaPolicy.RequiredAMR) == 0 {
 		return nil, errors.New("管理员 MFA 策略不能为空")
 	}
 	return &Service{
-		repository: repository,
-		provider:   provider,
-		hasher:     hasher,
-		pkce:       pkce,
-		mfaPolicy:  mfaPolicy,
-		now:        func() time.Time { return time.Now().UTC() },
-		newToken:   NewOpaqueToken,
-		newID:      uuid.New,
+		repository:        repository,
+		provider:          provider,
+		providerLogoutURL: providerLogoutURL,
+		hasher:            hasher,
+		pkce:              pkce,
+		mfaPolicy:         mfaPolicy,
+		now:               func() time.Time { return time.Now().UTC() },
+		newToken:          NewOpaqueToken,
+		newID:             uuid.New,
 	}, nil
 }
 
@@ -308,30 +322,35 @@ func (service *Service) Logout(
 	sessionToken string,
 	csrfToken string,
 	metadata RequestMetadata,
-) error {
+) (LogoutResult, error) {
+	result := LogoutResult{ProviderLogoutURL: service.providerLogoutURL}
 	if sessionToken == "" {
-		return nil
+		return result, nil
 	}
 	view, err := service.ResolveSession(ctx, sessionToken)
 	if err != nil {
-		return err
+		return LogoutResult{}, err
 	}
 	if view == nil {
-		return nil
+		return result, nil
 	}
 	providedDigest := service.hasher.Digest(SecretPurposeCSRFToken, csrfToken)
 	if csrfToken == "" || !hmac.Equal(providedDigest[:], view.Session.CSRFDigest[:]) {
-		return NewError(ErrorCodeCSRFInvalid)
+		return LogoutResult{}, NewError(ErrorCodeCSRFInvalid)
 	}
 	now := service.now()
 	audit := service.auditEvent(metadata, &view.Session.Principal.ID, "logout", "succeeded", "", now)
-	return service.repository.RevokeSessionWithAudit(
+	err = service.repository.RevokeSessionWithAudit(
 		ctx,
 		service.hasher.Digest(SecretPurposeSessionCookie, sessionToken),
 		now,
 		RevocationReasonLogout,
 		audit,
 	)
+	if err != nil {
+		return LogoutResult{}, err
+	}
+	return result, nil
 }
 
 // newFlowSecrets 生成互不复用的 state、浏览器关联值、nonce 和 PKCE verifier。

@@ -241,6 +241,7 @@ services:
       MAIL_SUITE_OIDC_CLIENT_ID: mail-suite-local
       MAIL_SUITE_OIDC_CLIENT_SECRET: ${MAIL_SUITE_OIDC_CLIENT_SECRET:?缺少 OIDC client secret}
       MAIL_SUITE_OIDC_REDIRECT_URI: https://mail.127-0-0-1.sslip.io:18444/api/v1/auth/callback
+      MAIL_SUITE_OIDC_POST_LOGOUT_REDIRECT_URI: https://mail.127-0-0-1.sslip.io:18444/
       MAIL_SUITE_AUTH_TRUSTED_ORIGIN: https://mail.127-0-0-1.sslip.io:18444
       MAIL_SUITE_OIDC_SCOPES: openid profile email
       MAIL_SUITE_OIDC_SIGNING_ALGORITHMS: RS256

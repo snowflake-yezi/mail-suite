@@ -37,8 +37,8 @@ type authService interface {
 	RejectLogin(context.Context, string, string, identity.RequestMetadata) error
 	// ResolveSession 查询当前浏览器会话。
 	ResolveSession(context.Context, string) (*identity.SessionView, error)
-	// Logout 校验 CSRF 并撤销当前会话。
-	Logout(context.Context, string, string, identity.RequestMetadata) error
+	// Logout 校验 CSRF、撤销当前会话并返回受信任的 provider 导航。
+	Logout(context.Context, string, string, identity.RequestMetadata) (identity.LogoutResult, error)
 }
 
 // New 创建只信任配置主站 origin 的认证 HTTP handler。
@@ -153,17 +153,25 @@ func (handler *Handler) logout(ctx *gin.Context) {
 		return
 	}
 	sessionToken, _ := ctx.Cookie(identity.SessionCookieName)
-	if err := handler.service.Logout(
+	result, err := handler.service.Logout(
 		ctx.Request.Context(),
 		sessionToken,
 		ctx.GetHeader("X-CSRF-Token"),
 		requestMetadata(ctx),
-	); err != nil {
+	)
+	if err != nil {
 		writeError(ctx, err)
 		return
 	}
+	if result.ProviderLogoutURL == "" {
+		writeError(ctx, identity.NewError(identity.ErrorCodePersistenceUnavailable))
+		return
+	}
 	clearSecureCookie(ctx, identity.SessionCookieName)
-	ctx.Status(http.StatusNoContent)
+	ctx.JSON(http.StatusOK, logoutResponse{
+		LoggedOut:         true,
+		ProviderLogoutURL: result.ProviderLogoutURL,
+	})
 }
 
 // validLogoutContent 只接受无请求体的 POST，并限制显式 Content-Type 为 JSON。
@@ -266,6 +274,12 @@ func valueString(value any) string {
 // anonymousSessionResponse 是不泄露旧 Cookie 状态的固定匿名响应。
 type anonymousSessionResponse struct {
 	Authenticated bool `json:"authenticated"`
+}
+
+// logoutResponse 是本地撤销提交后返回浏览器的固定前台退出指令。
+type logoutResponse struct {
+	LoggedOut         bool   `json:"logged_out"`
+	ProviderLogoutURL string `json:"provider_logout_url"`
 }
 
 // authenticatedSessionResponse 是邮箱与管理账号共享的会话响应主体。

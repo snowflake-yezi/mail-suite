@@ -52,6 +52,11 @@ export interface UnsupportedSession {
 export type CurrentSession =
   AnonymousSession | MailboxSession | AdministratorSession | UnsupportedSession
 
+// LogoutResult 是本地会话撤销后浏览器必须继续的受信任前台退出导航。
+export interface LogoutResult {
+  providerLogoutUrl: string
+}
+
 const anonymousSession: AnonymousSession = { authenticated: false }
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -240,8 +245,38 @@ export async function getCurrentSession(
   return readSessionResponse(await response.json())
 }
 
-// logoutCurrentSession 使用当前会话 CSRF nonce 撤销服务端 Cookie 会话。
-export async function logoutCurrentSession(csrfToken: string): Promise<void> {
+// readLogoutResponse 严格校验退出响应，拒绝非 HTTPS、凭据和 fragment。
+export function readLogoutResponse(payload: unknown): LogoutResult {
+  if (
+    !isRecord(payload) ||
+    !hasExactKeys(payload, ['logged_out', 'provider_logout_url']) ||
+    payload.logged_out !== true ||
+    typeof payload.provider_logout_url !== 'string' ||
+    payload.provider_logout_url.trim() !== payload.provider_logout_url
+  ) {
+    throw new Error('退出接口响应无效')
+  }
+  let providerLogoutUrl: URL
+  try {
+    providerLogoutUrl = new URL(payload.provider_logout_url)
+  } catch {
+    throw new Error('退出接口响应无效')
+  }
+  if (
+    providerLogoutUrl.protocol !== 'https:' ||
+    providerLogoutUrl.username !== '' ||
+    providerLogoutUrl.password !== '' ||
+    providerLogoutUrl.hash !== ''
+  ) {
+    throw new Error('退出接口响应无效')
+  }
+  return { providerLogoutUrl: providerLogoutUrl.toString() }
+}
+
+// logoutCurrentSession 使用当前会话 CSRF nonce 撤销本地会话并取得 IdP 导航。
+export async function logoutCurrentSession(
+  csrfToken: string,
+): Promise<LogoutResult> {
   const response = await fetch('/api/v1/auth/logout', {
     method: 'POST',
     credentials: 'same-origin',
@@ -250,7 +285,8 @@ export async function logoutCurrentSession(csrfToken: string): Promise<void> {
       'X-CSRF-Token': csrfToken,
     },
   })
-  if (response.status !== 204) {
+  if (response.status !== 200) {
     throw new Error('退出失败')
   }
+  return readLogoutResponse(await response.json())
 }
