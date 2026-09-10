@@ -84,9 +84,21 @@ if ([regex]::Matches($nginx, '(?m)^\s*listen 443 ssl(?: default_server)?;$').Cou
     throw 'Every public TLS virtual host must also listen on Docker-internal port 443'
 }
 Assert-Contains -Text $deploy -Pattern 'compose exec -T web wget -q -O -.*\\\s*\r?\n\s*"https://idp\.test\.snowye\.fun/realms/mail-suite-test/\.well-known/openid-configuration"' -Message 'Pre-API internal OIDC discovery probe is missing'
+Assert-Contains -Text $deploy -Pattern 'compose up -d --no-recreate keycloak web' -Message 'OIDC preflight must not recreate the new Web before client reconcile'
 Assert-Contains -Text $deploy -Pattern 'reconcile-keycloak-client\.py.*[\s\S]*--deployment-root.*--apply' -Message 'Deployment does not reconcile the Keycloak post-logout URI before API startup'
+Assert-Contains -Text $deploy -Pattern 'compose stop api web' -Message 'Deployment must stop the old API/Web pair before the incompatible logout contract switch'
 Assert-Contains -Text $verify -Pattern 'reconcile-keycloak-client\.py.*[\s\S]*--deployment-root.*--check' -Message 'Host verification does not check the Keycloak post-logout URI'
 Assert-Contains -Text $verify -Pattern 'post_logout_redirect_uri=https://mail\.test\.snowye\.fun/' -Message 'Host verification does not probe the registered post-logout URI'
+$preflightStartIndex = $deploy.IndexOf('compose up -d --no-recreate keycloak web')
+$reconcileIndex = $deploy.IndexOf('reconcile-keycloak-client.py', $preflightStartIndex)
+$stopPairIndex = $deploy.IndexOf('compose stop api web')
+$startPairIndex = $deploy.IndexOf('compose up -d --wait postgres keycloak stalwart web api worker')
+if ($preflightStartIndex -lt 0 -or
+    $reconcileIndex -le $preflightStartIndex -or
+    $stopPairIndex -le $reconcileIndex -or
+    $startPairIndex -le $stopPairIndex) {
+    throw 'OIDC preflight, reconcile and API/Web contract switch order is unsafe'
+}
 Assert-Contains -Text $deploy -Pattern 'wait_test_mailbox_operation' -Message 'Deployment does not wait for the active test mailbox operation'
 Assert-Contains -Text $deploy -Pattern "operations\.status IN \('failed', 'dead', 'superseded'\)" -Message 'Mailbox wait does not stop on terminal operation failure'
 Assert-Contains -Text $deploy -Pattern 'configure-keycloak-amr\.sh.*--apply' -Message 'Deployment does not reconcile Keycloak OTP AMR before API startup'

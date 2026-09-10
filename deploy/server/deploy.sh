@@ -218,13 +218,14 @@ deploy_release() {
   bash "${release_dir}/deploy/server/configure-keycloak-database.sh" "${release_dir}"
   bash "${release_dir}/deploy/server/bootstrap-stalwart.sh" "${release_dir}"
 
-  compose up -d keycloak web
+  compose up -d --no-recreate keycloak web
   verify_internal_oidc_discovery
   python3 "${release_dir}/deploy/server/reconcile-keycloak-client.py" \
     --deployment-root "${release_dir}" --apply
   bash "${release_dir}/deploy/server/configure-keycloak-amr.sh" "${release_dir}" --apply
   compose --profile tools run --rm identity-bootstrap --check --manifest /run/test-identity.json
   compose --profile tools run --rm identity-bootstrap --apply --manifest /run/test-identity.json
+  compose stop api web
   compose up -d --wait postgres keycloak stalwart web api worker
   wait_test_mailbox_operation
 
