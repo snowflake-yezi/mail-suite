@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -41,6 +42,16 @@ const (
 	ErrorCodeResourceConflict = "MAIL_CORE_RESOURCE_CONFLICT"
 	// ErrorCodeConfiguration 表示 adapter 收到不符合稳定命令契约的输入。
 	ErrorCodeConfiguration = "MAIL_CORE_CONFIGURATION_INVALID"
+	// ErrorCodeMailboxNotFound 表示目标邮箱在 mail-core 中尚不存在。
+	ErrorCodeMailboxNotFound = "MAIL_CORE_MAILBOX_NOT_FOUND"
+	// ErrorCodeMessageNotFound 表示当前邮箱中不存在指定邮件。
+	ErrorCodeMessageNotFound = "MAIL_CORE_MESSAGE_NOT_FOUND"
+	// ErrorCodeCursorInvalid 表示续页令牌无效或查询状态已经变化。
+	ErrorCodeCursorInvalid = "MAIL_CORE_CURSOR_INVALID"
+	// ErrorCodeReferenceInvalid 表示邮件或附件引用无效。
+	ErrorCodeReferenceInvalid = "MAIL_CORE_REFERENCE_INVALID"
+	// ErrorCodeTimeout 表示只读请求达到明确的时间上限。
+	ErrorCodeTimeout = "MAIL_CORE_TIMEOUT"
 )
 
 var _ mailcore.Adapter = (*Adapter)(nil)
@@ -448,8 +459,25 @@ func (adapter *Adapter) call(
 	mutation bool,
 	target any,
 ) error {
+	return adapter.callAs(ctx, apiPath, methodName, arguments, mutation,
+		adapter.adminUsername, adapter.adminPassword,
+		[]string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"}, target)
+}
+
+// callAs 以指定内部身份调用单个 JMAP 方法并核对响应。
+func (adapter *Adapter) callAs(
+	ctx context.Context,
+	apiPath string,
+	methodName string,
+	arguments any,
+	mutation bool,
+	username string,
+	password string,
+	using []string,
+	target any,
+) error {
 	body := map[string]any{
-		"using": []string{"urn:ietf:params:jmap:core", "urn:stalwart:jmap"},
+		"using": using,
 		"methodCalls": []any{
 			[]any{methodName, arguments, "c0"},
 		},
@@ -457,7 +485,8 @@ func (adapter *Adapter) call(
 	var envelope struct {
 		MethodResponses []json.RawMessage `json:"methodResponses"`
 	}
-	if err := adapter.requestJSON(ctx, http.MethodPost, apiPath, body, mutation, &envelope); err != nil {
+	if err := adapter.requestJSONAs(ctx, http.MethodPost, apiPath, body, mutation,
+		username, password, &envelope); err != nil {
 		return err
 	}
 	if len(envelope.MethodResponses) != 1 {
@@ -495,6 +524,21 @@ func (adapter *Adapter) requestJSON(
 	mutation bool,
 	target any,
 ) error {
+	return adapter.requestJSONAs(ctx, method, path, body, mutation,
+		adapter.adminUsername, adapter.adminPassword, target)
+}
+
+// requestJSONAs 在同一内部 HTTPS origin 上以指定身份执行有界 JSON 请求。
+func (adapter *Adapter) requestJSONAs(
+	ctx context.Context,
+	method string,
+	path string,
+	body any,
+	mutation bool,
+	username string,
+	password string,
+	target any,
+) error {
 	requestURL := cloneURL(adapter.endpoint)
 	requestURL.Path = path
 	var requestBody io.Reader
@@ -509,13 +553,16 @@ func (adapter *Adapter) requestJSON(
 	if err != nil {
 		return mailcore.NewError(mailcore.ErrorClassPermanent, ErrorCodeConfiguration)
 	}
-	request.SetBasicAuth(adapter.adminUsername, adapter.adminPassword)
+	request.SetBasicAuth(username, password)
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := adapter.httpClient.Do(request)
 	if err != nil {
+		if timeout := readTimeoutError(ctx, err, mutation); timeout != nil {
+			return timeout
+		}
 		return transportError(ctx, mutation)
 	}
 	defer func() { _ = response.Body.Close() }()
@@ -524,6 +571,9 @@ func (adapter *Adapter) requestJSON(
 	}
 	limited := io.LimitReader(response.Body, maximumResponseBytes+1)
 	encoded, err := io.ReadAll(limited)
+	if timeout := readTimeoutError(ctx, err, mutation); timeout != nil {
+		return timeout
+	}
 	if err != nil || len(encoded) == 0 || len(encoded) > maximumResponseBytes ||
 		json.Unmarshal(encoded, target) != nil {
 		return mailcore.NewError(uncertainClass(mutation), ErrorCodeProtocolInvalid)
@@ -663,11 +713,16 @@ func classifyMethodError(errorType string, mutation bool) error {
 // statusError 将 HTTP 状态映射为不会泄漏响应正文的稳定错误。
 func statusError(status int, mutation bool) error {
 	switch status {
+	case http.StatusGatewayTimeout:
+		if !mutation {
+			return mailcore.NewError(mailcore.ErrorClassRetryable, ErrorCodeTimeout)
+		}
+		return mailcore.NewError(mailcore.ErrorClassUnknown, ErrorCodeUnavailable)
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return mailcore.NewError(mailcore.ErrorClassPermanent, ErrorCodeAuthentication)
 	case http.StatusTooManyRequests:
 		return mailcore.NewError(mailcore.ErrorClassRetryable, ErrorCodeRateLimited)
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusBadGateway, http.StatusServiceUnavailable:
 		return mailcore.NewError(uncertainClass(mutation), ErrorCodeUnavailable)
 	default:
 		if status >= 500 {
@@ -675,6 +730,19 @@ func statusError(status int, mutation bool) error {
 		}
 		return mailcore.NewError(mailcore.ErrorClassPermanent, ErrorCodeProtocolInvalid)
 	}
+}
+
+// readTimeoutError 仅将只读请求的 deadline 或传输超时归一化为稳定错误。
+func readTimeoutError(ctx context.Context, err error, mutation bool) error {
+	if mutation || err == nil {
+		return nil
+	}
+	var networkError net.Error
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) ||
+		(errors.As(err, &networkError) && networkError.Timeout()) {
+		return mailcore.NewError(mailcore.ErrorClassRetryable, ErrorCodeTimeout)
+	}
+	return nil
 }
 
 // transportError 保留调用取消语义，并区分只读请求和可能已提交的 mutation。

@@ -96,6 +96,21 @@ func TestAdapterAgainstRealStalwart(t *testing.T) {
 	query.ConfigurationHash = configurationHashV2
 	query.Deadline = command.Deadline
 	assertRealObservation(t, adapter, ctx, query, 2, configurationHashV2)
+
+	readScope := mailcore.ReadScope{
+		MailboxID: mailboxID, DomainID: domainID, Address: query.Address,
+		Revision: 2, ConfigurationHash: configurationHashV2,
+		Deadline: time.Now().Add(30 * time.Second),
+	}
+	page, err := adapter.ListMessages(ctx, mailcore.ListMessagesQuery{Scope: readScope, Limit: 10})
+	if err != nil {
+		t.Fatalf("真实 Stalwart 邮箱身份列表读取失败：%v", err)
+	}
+	if len(page.Messages) > 0 {
+		if _, err = adapter.GetMessage(ctx, readScope, page.Messages[0].ID); err != nil {
+			t.Fatalf("真实 Stalwart 邮件详情读取失败：%v", err)
+		}
+	}
 }
 
 // logRealSessionContract 只记录 session 的公开结构，不输出认证信息或响应正文。
