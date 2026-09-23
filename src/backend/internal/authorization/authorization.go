@@ -2,6 +2,7 @@
 package authorization
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"mime"
@@ -40,6 +41,14 @@ const (
 	ErrorCodeNotFound ErrorCode = "NOT_FOUND"
 	// ErrorCodeIdempotencyConflict 表示幂等键绑定了不同请求。
 	ErrorCodeIdempotencyConflict ErrorCode = "IDEMPOTENCY_CONFLICT"
+	// ErrorCodeOperationNotFound 隐藏租户范围外的 operation。
+	ErrorCodeOperationNotFound ErrorCode = "OPERATION_NOT_FOUND"
+	// ErrorCodeUpstreamTimeout 表示邮件依赖未在截止时间内回应。
+	ErrorCodeUpstreamTimeout ErrorCode = "UPSTREAM_TIMEOUT"
+	// ErrorCodeUpstreamUnavailable 表示邮件依赖当前不可用。
+	ErrorCodeUpstreamUnavailable ErrorCode = "UPSTREAM_UNAVAILABLE"
+	// ErrorCodePersistenceUnavailable 表示控制面持久化依赖不可用。
+	ErrorCodePersistenceUnavailable ErrorCode = "PERSISTENCE_UNAVAILABLE"
 )
 
 // Error 是不包含数据库、Cookie 或凭据细节的公开授权错误。
@@ -58,12 +67,16 @@ func (authorizationError *Error) Error() string {
 // NewError 创建指定错误码的稳定错误。
 func NewError(code ErrorCode) *Error {
 	messages := map[ErrorCode]string{
-		ErrorCodeAuthRequired:        "需要登录",
-		ErrorCodeAuthForbidden:       "当前账号无权访问此资源",
-		ErrorCodeCSRFInvalid:         "请求验证失败",
-		ErrorCodeInvalidArgument:     "请求参数无效",
-		ErrorCodeNotFound:            "资源不存在",
-		ErrorCodeIdempotencyConflict: "幂等键已用于不同请求",
+		ErrorCodeAuthRequired:           "需要登录",
+		ErrorCodeAuthForbidden:          "当前账号无权访问此资源",
+		ErrorCodeCSRFInvalid:            "请求验证失败",
+		ErrorCodeInvalidArgument:        "请求参数无效",
+		ErrorCodeNotFound:               "资源不存在",
+		ErrorCodeIdempotencyConflict:    "幂等键已用于不同请求",
+		ErrorCodeOperationNotFound:      "operation 不存在",
+		ErrorCodeUpstreamTimeout:        "邮件服务响应超时",
+		ErrorCodeUpstreamUnavailable:    "邮件服务暂不可用",
+		ErrorCodePersistenceUnavailable: "持久化服务暂不可用",
 	}
 	message, ok := messages[code]
 	if !ok {
@@ -75,13 +88,14 @@ func NewError(code ErrorCode) *Error {
 
 // Context 保存一次请求已经由服务端确认的主体和资源边界。
 type Context struct {
-	principalID uuid.UUID
-	tenantID    uuid.UUID
-	accountType identity.AccountType
-	mailboxID   uuid.UUID
-	permissions []string
-	csrfToken   string
-	requestID   string
+	principalID  uuid.UUID
+	tenantID     uuid.UUID
+	accountType  identity.AccountType
+	mailboxID    uuid.UUID
+	permissions  []string
+	csrfDigest   [sha256.Size]byte
+	csrfVerified bool
+	requestID    string
 }
 
 // NewContext 将当前有效会话转换为不可变授权上下文。
@@ -107,7 +121,7 @@ func NewContext(view *identity.SessionView, requestID string) (Context, error) {
 		accountType: principal.AccountType,
 		mailboxID:   mailboxID(principal.Mailbox),
 		permissions: permissions,
-		csrfToken:   view.CSRFToken,
+		csrfDigest:  sha256.Sum256([]byte(view.CSRFToken)),
 		requestID:   strings.TrimSpace(requestID),
 	}, nil
 }
@@ -127,6 +141,9 @@ func (context Context) MailboxID() uuid.UUID { return context.mailboxID }
 // RequestID 返回当前请求的关联标识。
 func (context Context) RequestID() string { return context.requestID }
 
+// CSRFVerified 表示写请求已通过公共来源、nonce 和请求约束检查。
+func (context Context) CSRFVerified() bool { return context.csrfVerified }
+
 // Permissions 返回排序后的权限副本，防止调用方修改上下文。
 func (context Context) Permissions() []string { return append([]string(nil), context.permissions...) }
 
@@ -138,10 +155,11 @@ func (context Context) HasPermission(permission string) bool {
 
 // VerifyCSRF 使用常量时间比较校验会话绑定的 CSRF nonce。
 func (context Context) VerifyCSRF(token string) bool {
-	if token == "" || context.csrfToken == "" {
+	if token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(context.csrfToken)) == 1
+	digest := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(digest[:], context.csrfDigest[:]) == 1
 }
 
 // RequireAdministrator 要求当前上下文是具备管理入口权限的 administrator。
@@ -179,24 +197,27 @@ func (context Context) RequireResource(resource Resource) error {
 	return context.RequireMailbox(resource.MailboxID)
 }
 
-// ValidateMutationRequest 校验公共写请求边界，不执行任何领域副作用。
-func ValidateMutationRequest(request *http.Request, trustedOrigin string, context Context, requireIdempotency bool) error {
+// ValidateMutationRequest 校验公共写请求边界并返回已验证上下文，不执行领域副作用。
+func ValidateMutationRequest(request *http.Request, trustedOrigin string, context Context, requireIdempotency bool) (Context, error) {
 	if request == nil || !isMutation(request.Method) {
-		return NewError(ErrorCodeInvalidArgument)
+		return Context{}, NewError(ErrorCodeInvalidArgument)
 	}
 	if request.ContentLength > DefaultMaxJSONBodyBytes {
-		return NewError(ErrorCodeInvalidArgument)
+		return Context{}, NewError(ErrorCodeInvalidArgument)
 	}
-	if !trustedBrowserRequest(request, trustedOrigin) || !context.VerifyCSRF(request.Header.Get("X-CSRF-Token")) {
-		return NewError(ErrorCodeCSRFInvalid)
+	csrfToken, uniqueCSRF := singleHeader(request, "X-CSRF-Token")
+	if !trustedBrowserRequest(request, trustedOrigin) || !uniqueCSRF || !context.VerifyCSRF(csrfToken) {
+		return Context{}, NewError(ErrorCodeCSRFInvalid)
 	}
 	if err := validateContentType(request); err != nil {
-		return err
+		return Context{}, err
 	}
-	if requireIdempotency && !validIdempotencyKey(request.Header.Get("Idempotency-Key")) {
-		return NewError(ErrorCodeInvalidArgument)
+	key, uniqueKey := singleHeader(request, "Idempotency-Key")
+	if !uniqueKey || (requireIdempotency && key == "") || (key != "" && !validIdempotencyKey(key)) {
+		return Context{}, NewError(ErrorCodeInvalidArgument)
 	}
-	return nil
+	context.csrfVerified = true
+	return context, nil
 }
 
 func mailboxID(mailbox *identity.Mailbox) uuid.UUID {
@@ -220,16 +241,27 @@ func trustedBrowserRequest(request *http.Request, trustedOrigin string) bool {
 	if err != nil || parsedOrigin.Scheme != "https" || parsedOrigin.Host == "" || parsedOrigin.Path != "" || parsedOrigin.RawQuery != "" {
 		return false
 	}
-	if origin := request.Header.Get("Origin"); origin != "" {
+	origin, uniqueOrigin := singleHeader(request, "Origin")
+	if !uniqueOrigin {
+		return false
+	}
+	if origin != "" {
 		return origin == trustedOrigin
 	}
-	referer, err := url.ParseRequestURI(request.Header.Get("Referer"))
+	refererValue, uniqueReferer := singleHeader(request, "Referer")
+	if !uniqueReferer {
+		return false
+	}
+	referer, err := url.ParseRequestURI(refererValue)
 	return err == nil && referer.Scheme == parsedOrigin.Scheme && referer.Host == parsedOrigin.Host &&
 		referer.Scheme+"://"+referer.Host == trustedOrigin
 }
 
 func validateContentType(request *http.Request) error {
-	contentType := request.Header.Get("Content-Type")
+	contentType, unique := singleHeader(request, "Content-Type")
+	if !unique {
+		return NewError(ErrorCodeInvalidArgument)
+	}
 	if contentType == "" && request.ContentLength == 0 {
 		return nil
 	}
@@ -240,8 +272,18 @@ func validateContentType(request *http.Request) error {
 	return nil
 }
 
+func singleHeader(request *http.Request, name string) (string, bool) {
+	values := request.Header.Values(name)
+	if len(values) > 1 {
+		return "", false
+	}
+	if len(values) == 0 {
+		return "", true
+	}
+	return values[0], true
+}
+
 func validIdempotencyKey(value string) bool {
-	value = strings.TrimSpace(value)
 	return len(value) >= 16 && len(value) <= 128 && idempotencyKeyPattern.MatchString(value)
 }
 

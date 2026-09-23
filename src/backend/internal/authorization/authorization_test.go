@@ -17,6 +17,9 @@ func TestNewContextValidatesMailboxInvariantAndSortsPermissions(t *testing.T) {
 	if err != nil || !context.HasPermission(identity.PermissionPortalAdminAccess) {
 		t.Fatalf("合法管理员上下文创建失败：context=%+v err=%v", context, err)
 	}
+	if context.CSRFVerified() || !context.VerifyCSRF("csrf-token") || context.VerifyCSRF("other-token") {
+		t.Fatal("新建上下文只能保存待验证的会话 CSRF 摘要")
+	}
 	if got := context.Permissions(); got[0] != "a.permission" || got[2] != "z.permission" {
 		t.Fatalf("权限应排序且返回副本：%v", got)
 	}
@@ -61,27 +64,32 @@ func TestValidateMutationRequestChecksOriginCSRFContentAndIdempotency(t *testing
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-CSRF-Token", "csrf-token")
 	request.Header.Set("Idempotency-Key", "request-key-123456")
-	if err := ValidateMutationRequest(request, "https://mail.example.test", context, true); err != nil {
+	validated, err := ValidateMutationRequest(request, "https://mail.example.test", context, true)
+	if err != nil || !validated.CSRFVerified() || context.CSRFVerified() {
 		t.Fatalf("合法写请求被拒绝：%v", err)
 	}
 	request.Header.Del("Origin")
 	request.Header.Set("Referer", "https://mail.example.test")
-	if err := ValidateMutationRequest(request, "https://mail.example.test", context, true); err != nil {
+	if _, err := ValidateMutationRequest(request, "https://mail.example.test", context, true); err != nil {
 		t.Fatalf("同源 Referer 回退应通过：%v", err)
 	}
 	request.Header.Set("Origin", "https://mail.example.test")
 	request.Header.Set("Origin", "https://evil.example.test")
-	if !IsErrorCode(ValidateMutationRequest(request, "https://mail.example.test", context, true), ErrorCodeCSRFInvalid) {
+	if _, err := ValidateMutationRequest(request, "https://mail.example.test", context, true); !IsErrorCode(err, ErrorCodeCSRFInvalid) {
 		t.Fatal("跨站请求必须拒绝")
 	}
 	request.Header.Set("Origin", "https://mail.example.test")
 	request.Header.Set("X-CSRF-Token", "wrong")
-	if !IsErrorCode(ValidateMutationRequest(request, "https://mail.example.test", context, true), ErrorCodeCSRFInvalid) {
+	if _, err := ValidateMutationRequest(request, "https://mail.example.test", context, true); !IsErrorCode(err, ErrorCodeCSRFInvalid) {
 		t.Fatal("错误 CSRF 必须拒绝")
 	}
 	request.Header.Set("X-CSRF-Token", "csrf-token")
 	request.Header.Del("Idempotency-Key")
-	if !IsErrorCode(ValidateMutationRequest(request, "https://mail.example.test", context, true), ErrorCodeInvalidArgument) {
+	if _, err := ValidateMutationRequest(request, "https://mail.example.test", context, true); !IsErrorCode(err, ErrorCodeInvalidArgument) {
 		t.Fatal("缺少幂等键必须拒绝")
+	}
+	request.Header.Set("Idempotency-Key", " request-key-123456 ")
+	if _, err := ValidateMutationRequest(request, "https://mail.example.test", context, true); !IsErrorCode(err, ErrorCodeInvalidArgument) {
+		t.Fatal("含空格的幂等键不得修剪后接受")
 	}
 }
