@@ -30,7 +30,9 @@ Node 版本记录在 `.node-version`，pnpm 版本记录在 `src/web/package.jso
 ```powershell
 $env:GOCACHE = "$PWD\.cache\go-build"
 $env:GOTMPDIR = "$PWD\.tmp"
-corepack pnpm --dir src/web install --frozen-lockfile --store-dir ../../.pnpm-store
+Push-Location src/web
+corepack pnpm install --frozen-lockfile --store-dir ../../.pnpm-store
+Pop-Location
 go mod download
 ```
 
@@ -68,7 +70,9 @@ $env:MAIL_SUITE_AUTH_MODE = "disabled"
 go run ./src/backend/cmd/api
 go run ./src/backend/cmd/migrator --check-config
 go run ./src/backend/cmd/identity-bootstrap --version
-corepack pnpm --dir src/web dev
+Push-Location src/web
+corepack pnpm dev
+Pop-Location
 ```
 
 本地运行真实 worker 时，先启动已验证的 Stalwart 环境，再在独立终端注入连接参数。两个 secret 文件
@@ -179,19 +183,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/integration/server/ver
 在 Linux 或 Git Bash 中还需运行 `bash tests/integration/server/verify-shell-syntax.sh`，
 该检查与服务器静态契约、AliDNS 单测一起由 CI 执行。
 
-Web 与契约检查：
+Web 与契约检查：必须先进入 `src/web`，让 Corepack 读取该目录的 `packageManager` 并选择
+固定的 pnpm 版本。仅在仓库根目录传递 `--dir src/web` 不能保证 Corepack 选择正确版本。
 
 ```powershell
-corepack pnpm --dir src/web install --frozen-lockfile --store-dir ../../.pnpm-store
-corepack pnpm --dir src/web run format:check
-corepack pnpm --dir src/web run lint
-corepack pnpm --dir src/web run typecheck
-corepack pnpm --dir src/web test
-corepack pnpm --dir src/web run contract
-corepack pnpm --dir src/web run build
-corepack pnpm --dir src/web run e2e
-corepack pnpm --dir src/web licenses list --prod
-corepack pnpm --dir src/web audit --prod --audit-level high
+Push-Location src/web
+corepack pnpm install --frozen-lockfile --store-dir ../../.pnpm-store
+corepack pnpm run format:check
+corepack pnpm run lint
+corepack pnpm run typecheck
+corepack pnpm test
+corepack pnpm run contract
+corepack pnpm run build
+corepack pnpm run e2e
+corepack pnpm licenses list --prod
+corepack pnpm audit --prod --audit-level high
+Pop-Location
 git diff --check
 ```
 
