@@ -5,15 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/url"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/snowflake-yezi/mail-suite/src/backend/internal/mailcore"
 	operationdomain "github.com/snowflake-yezi/mail-suite/src/backend/internal/operation"
@@ -140,6 +137,8 @@ func TestOperationRepositoryFencesConcurrentClaimsAndRecoversExpiredLease(t *tes
 	if databaseURL == "" {
 		t.Skip("未设置 MAIL_SUITE_TEST_DATABASE_URL，跳过 operation worker 真实 PostgreSQL 集成测试")
 	}
+	// 领取会扫描全部租户，必须隔离其他测试包创建的待开通任务。
+	databaseURL = isolatedOperationDatabaseURL(t, databaseURL)
 	ctx := context.Background()
 	if err := migrations.Run(ctx, databaseURL, migrations.CommandUp, io.Discard); err != nil {
 		t.Fatalf("应用 operation worker migration 失败：%v", err)
@@ -475,37 +474,8 @@ func TestMailboxOperationMigrationPreservesRetryWaitAcrossDownUp(t *testing.T) {
 		t.Skip("未设置 MAIL_SUITE_TEST_DATABASE_URL，跳过 operation worker migration 往返测试")
 	}
 	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatalf("创建 migration 往返管理连接池失败：%v", err)
-	}
-	t.Cleanup(adminPool.Close)
-
-	schemaName := "mail_suite_worker_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	quotedSchema := pgx.Identifier{schemaName}.Sanitize()
-	if _, err = adminPool.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
-		t.Fatalf("创建 migration 往返隔离 schema 失败：%v", err)
-	}
-	t.Cleanup(func() {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, cleanupErr := adminPool.Exec(
-			cleanupContext,
-			"DROP SCHEMA "+quotedSchema+" CASCADE",
-		); cleanupErr != nil {
-			t.Errorf("清理 migration 往返隔离 schema 失败：%v", cleanupErr)
-		}
-	})
-
-	parsedURL, err := url.Parse(databaseURL)
-	if err != nil || parsedURL.Scheme == "" {
-		t.Fatalf("测试数据库必须使用 PostgreSQL URL：%v", err)
-	}
-	query := parsedURL.Query()
-	query.Set("search_path", schemaName)
-	parsedURL.RawQuery = query.Encode()
-	isolatedDatabaseURL := parsedURL.String()
-	if err = migrations.Run(ctx, isolatedDatabaseURL, migrations.CommandUp, io.Discard); err != nil {
+	isolatedDatabaseURL := isolatedOperationDatabaseURL(t, databaseURL)
+	if err := migrations.Run(ctx, isolatedDatabaseURL, migrations.CommandUp, io.Discard); err != nil {
 		t.Fatalf("隔离 schema 应用 migration 失败：%v", err)
 	}
 
