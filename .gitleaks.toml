@@ -1,0 +1,13 @@
+# 保留默认规则；仅排除离线构建脚本中公开、固定的非运行时占位值。
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "离线镜像构建校验使用的固定占位值，不是运行时凭据"
+condition = "AND"
+paths = ['''^deploy/server/build-offline-images\.ps1$''']
+regexTarget = "secret"
+regexes = ['''^YnVpbGQtdmFsaWRhdGlvbi1vbmx5LWJ1aWxkLXZhbGlkYXRpb24=$''']
